@@ -181,7 +181,10 @@ class FakeClient:
         self.sent.append((chat, body, reply_to))
 
 fake = FakeClient()
-ns = {"eng": eng, "client": fake, "DRY_RUN": m.DRY_RUN}
+# صف تک‌عملکردی با فاصله‌ی صفر → این تست فقط «متنِ پیام» را می‌سنجد
+CD0 = m.ExCooldown(gap_min=0, gap_max=0)
+ns = {"eng": eng, "client": fake, "DRY_RUN": m.DRY_RUN,
+      "ex_cd": CD0, "time": time}
 exec(fn_src, ns)
 send_rem = ns["send_not_joined_reminder"]
 
@@ -242,7 +245,8 @@ branch_src = (
     + "\n".join("    " + ln for ln in ded8.splitlines())
     + "\n"
 )
-bns = {"time": time}
+bns = {"time": time, "ex_cd": CD0,
+       "next_action_after": lambda rec, base=None: int(base)}
 exec(branch_src, bns)
 _blk = bns["_blk"]
 
@@ -361,10 +365,10 @@ class FakeAsyncio:
     @staticmethod
     async def sleep(s):
         SLEEPS.append(s)
-async def always_out(uid):
+async def always_out(uid, rec_id=None, queue=True):
     return False
 cns = {"eng": eng2, "asyncio": FakeAsyncio, "peer_in_my_channel": always_out,
-       "membership_check_delay": lambda: 25}
+       "membership_check_delay": lambda: 25, "ex_cd": CD0}
 exec(cf_src, cns)
 confirm = cns["confirm_peer_membership"]
 
@@ -404,10 +408,12 @@ harness_src = (
     "    note = stub.note\n"
     "    check_gate = stub.gate\n"
     "    warn_membership_check_broken = stub.warn_broken\n"
+    "    ex_cd = CD0\n"
+    "    next_action_after = lambda rec, base=None: int(base)\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
-hns = {}
+hns = {"CD0": CD0}
 exec(harness_src, hns)
 run_once = hns["_run"]
 
@@ -426,15 +432,16 @@ class Stub:
         self.warned = []
     async def warn_broken(self, now):
         self.warned.append(now)
-    async def confirm(self, pid, fast=False):
+    async def confirm(self, pid, fast=False, rec_id=None):
         # نوبت‌های یادآوری باید با fast=True صدا زده شوند تا فاصله‌ی
         # چک عضویت روی بازه‌ی تنظیم‌شده‌ی کاربر اضافه نشود.
+        # rec_id یعنی چک در صفِ تک‌عملکردیِ همان رکورد رفته است.
         self.fast.append(bool(fast))
         return self.member_map.get(pid)
     async def send_rem(self, rec):
         self.sent.append(rec["id"])
         return True
-    async def leave(self, link):
+    async def leave(self, link, rec_id=None):
         self.left.append(link)
         return True, ""
     async def note(self, text):

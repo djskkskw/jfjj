@@ -94,10 +94,12 @@ harness_src = (
     "    note = stub.note\n"
     "    warn_membership_check_broken = stub.warn\n"
     "    check_gate = stub.gate\n"
+    "    next_action_after = lambda rec, base=None: int(base)\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
-hns = {"m": m}
+# صف تک‌عملکردی با فاصله‌ی صفر → رفتارِ این تست‌ها مثل قبل می‌ماند
+hns = {"m": m, "ex_cd": m.ExCooldown(gap_min=0, gap_max=0)}
 exec(harness_src, hns)
 run_reminder = hns["_run"]
 
@@ -113,7 +115,8 @@ class Stub:
         self.fast = []
         self.gate = gate or m.CheckGate(base_gap=0.0)
 
-    async def confirm(self, pid, fast=False):
+    async def confirm(self, pid, fast=False, rec_id=None):
+        # rec_id یعنی چک در صفِ تک‌عملکردیِ همان رکورد رفته است.
         self.fast.append(bool(fast))
         return self.member_map.get(pid)
 
@@ -123,7 +126,7 @@ class Stub:
         self.sent.append(rec["id"])
         return True
 
-    async def leave(self, link):
+    async def leave(self, link, rec_id=None):
         self.left.append(link)
         return True, ""
 
@@ -232,7 +235,7 @@ while lines and (lines[0].lstrip().startswith("#") or not lines[0].strip()):
 while lines and not lines[-1].strip():
     lines.pop()
 ded = "\n".join(ln[IND:] if ln.startswith(" " * IND) else ln for ln in lines)
-ph = {}
+ph = {"m": m, "ex_cd": m.ExCooldown(gap_min=0, gap_max=0)}
 pharness = (
     "import asyncio, time\n"
     "async def _run(eng, x, stub):\n"
@@ -245,6 +248,7 @@ pharness = (
     "    warn_membership_check_broken = stub.warn\n"
     "    note = stub.note\n"
     "    check_gate = stub.gate\n"
+    "    next_action_after = lambda rec, base=None: int(base)\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
@@ -456,7 +460,8 @@ class FakeClientCap:
 
 def make_real_sender(eng, client):
     ns = {"eng": eng, "client": client, "DRY_RUN": False,
-          "asyncio": asyncio, "DEFAULT_MSG_NO": m.DEFAULT_MSG_NO}
+          "asyncio": asyncio, "DEFAULT_MSG_NO": m.DEFAULT_MSG_NO,
+          "ex_cd": m.ExCooldown(gap_min=0, gap_max=0), "time": time}
     exec("async def send_not_joined_reminder(rec):\n"
          + "\n".join("    " + ln for ln in ded_r.splitlines()) + "\n", ns)
     return ns["send_not_joined_reminder"]
