@@ -132,6 +132,18 @@ DEFAULTS = {
         "reply_max_sec": 18,         # (عضو نیست/صبر کن/کانالت پیدا نشد؛ ۵–۱۸ ثانیه)
         "reminder_min_sec": 20,      # فاصله کمینه بین دو پیام «نیومدی» (پیش‌فرض ۲۰–۴۰ ثانیه تصادفی)
         "reminder_max_sec": 40,      # فاصله بیشینه بین دو پیام «نیومدی» — هیچ‌وقت پشت سر هم نمی‌روند
+        # ── صفِ تک‌عملکردی تبادل (فیکس «همه‌چیز درجا پشت سر هم») ──
+        # هر عملکرد تبادل (چک عضویت / جوین / لفت / پیام «نیومدی» / «جوین شدم»)
+        # یک «عملکرد» حساب می‌شود. تا وقتی یک عملکرد تمام نشده، عملکرد بعدی
+        # شروع نمی‌شود؛ بعد از تمام‌شدنش هم op_gap_min تا op_gap_max ثانیه
+        # (پیش‌فرض ۱۵–۲۰ تصادفی) صبر می‌شود و بعد نوبت بعدی اجرا می‌شود.
+        # روی هر رکورد هم همین فاصله رعایت می‌شود: رکوردی که همین الان
+        # چک/جوین/پیام گرفته، دوباره چک نمی‌شود (مثلاً بلافاصله بعد از جوین
+        # «نیومدی» نمی‌رود؛ اول ۱۵–۲۰ ثانیه صبر، بعد چکِ واقعیِ عضویت).
+        # این بازه «کفِ» فاصله‌هاست: فاصله‌ی یادآوری/پاسخ اگر بلندتر باشد،
+        # همان بلندتر مبناست (هرگز کوتاه‌تر از این نمی‌شود).
+        "op_gap_min_sec": 15,
+        "op_gap_max_sec": 20,
         # بعد از این تعداد پیام «عضو نیست»، اگر طرف هنوز نیامده باشد از
         # کانالش لفت می‌دهیم (یا اگر هنوز جوین نشده‌ایم، تبادل لغو می‌شود).
         "max_reminders": 2,
@@ -349,6 +361,12 @@ class Settings:
                     self.data["exchange"]["scan_jitter_max_sec"] = 15
                 if "scan_last_time" not in old_ex:
                     self.data["exchange"]["scan_last_time"] = {}
+                # صفِ تک‌عملکردی تبادل: کلیدهای گم‌شده همیشه پر می‌شوند
+                # (مهاجرتِ مستقل از v2 تا برای همه‌ی نصب‌ها اعمال شود).
+                if "op_gap_min_sec" not in old_ex:
+                    self.data["exchange"]["op_gap_min_sec"] = 15
+                if "op_gap_max_sec" not in old_ex:
+                    self.data["exchange"]["op_gap_max_sec"] = 20
                 if old_ex.get("recheck_minutes") in (None, 0):
                     self.data["exchange"]["recheck_minutes"] = 1
                 # ── مهاجرت یک‌بار (نسخه ۲) به پیش‌فرض‌های سالم ──
@@ -807,6 +825,239 @@ class CheckGate:
     def blocked(self, now=None):
         now = now if now is not None else time.time()
         return now < self.cooldown_until
+
+
+class ExCooldown:
+    """صفِ «تک‌عملکردی» تبادل + خنک‌کننده‌ی بین عملکرد‌ها.
+
+    باگی که این کلاس می‌بندد: چند مسیر همزمان (پیامِ «جوین شدم»ِ طرف،
+    حلقه‌ی یادآوری «نیومدی»، چک نگهبانی عضویت، کارگر صفِ جوین) هیچ‌کدام
+    از کارِ بقیه خبر نداشتند و روی **یک رکورد** پشت‌سرهم عملیات می‌زدند؛
+    نتیجه‌اش این بود که جوین → چک → «نیومدی» → «نیومدی» دوم → لفت همه
+    در یک لحظه (صدم‌ثانیه) اتفاق می‌افتاد و طرف اصلاً فرصت جوین‌شدن نداشت.
+
+    سه کاری که می‌کند:
+
+      ۱) قفل سراسری عملکرد‌ها — در هر لحظه فقط **یک** عملکردِ تبادل
+         (چک عضویت، جوین، لفت، ارسال پیام) اجرا می‌شود. عملکردِ بعدی تا
+         تمام‌شدنِ قبلی منتظر می‌ماند.
+
+      ۲) فاصله‌ی سراسری — بعد از تمام‌شدن هر عملکرد، یک فاصله‌ی تصادفی
+         (پیش‌فرض ۱۵–۲۰ ثانیه) قبل از عملکردِ بعدی صبر می‌شود.
+
+      ۳) خنک‌کننده‌ی هر رکورد — برای هر رکورد تبادل زمانِ «آخرین عملکردِ
+         تمام‌شده» نگه داشته می‌شود؛ رکوردی که تازه چک/جوین/پیام گرفته،
+         تا پایانِ همان فاصله دوباره چک یا پیام نمی‌گیرد. پس چکِ عضویتِ
+         بلافاصله بعد از جوین («آیا واقعاً جوین شده؟») زودتر از ۱۵–۲۰
+         ثانیه انجام نمی‌شود و دو پیام «نیومدی» هرگز پشت‌سرهم نمی‌روند.
+
+    نکته‌ی طراحی: صبرهای طولانیِ انسانی (تأخیر پیام «بیا»، فاصله‌ی چک دوم)
+    بیرونِ قفل سراسری انجام می‌شوند تا کل ربات را قفل نکنند؛ فقط خودِ
+    عملیاتِ تلگرام (درخواست/ارسال) زیر قفل است. خنک‌کننده‌ی رکورد مستقل از
+    قفل کار می‌کند، پس نظمِ زمانی حتی وقتی عملیات سریع است هم حفظ می‌شود.
+    """
+
+    def __init__(self, cfg=None, gap_min=15.0, gap_max=20.0, now=None):
+        self._cfg = cfg
+        self.gap_min = float(gap_min)
+        self.gap_max = float(gap_max)
+        self.lock = asyncio.Lock()      # قفل سراسری عملکرد‌ها
+        self._lock = self.lock
+        # رکوردهایی که همین الان عملکردشان در صف/جریان است؛ wait_for برای
+        # این‌ها «صبر کن» می‌دهد تا دو مسیر همزمان روی یک رکورد کار نکنند.
+        self._busy = set()
+        self._last_done = {}        # رکورد → زمانِ تمام‌شدنِ آخرین عملکرد
+        self._order = []            # برای هرسِ حافظه
+        self.last_global_done = 0.0
+        if now is not None:
+            self.last_global_done = float(now)
+
+    # ── تنظیم‌ها ──
+    def configure(self, lo, hi):
+        """بازه‌ی فاصله را از تنظیم‌ها می‌گیرد (هیچ‌وقت وارونه یا منفی نمی‌شود)."""
+        try:
+            lo = float(lo)
+            hi = float(hi)
+        except (TypeError, ValueError):
+            return
+        self.gap_min = max(0.0, min(3600.0, lo))
+        self.gap_max = max(self.gap_min, min(3600.0, hi))
+
+    def apply_config(self):
+        """هر بار از تنظیم‌های فعلی موتور خوانده می‌شود تا دستورِ کاربر اثر کند."""
+        if self._cfg is None:
+            return
+        try:
+            x = self._cfg()
+            self.configure(x.get("op_gap_min_sec", 15), x.get("op_gap_max_sec", 20))
+        except Exception:
+            pass
+
+    def seconds(self):
+        """یک فاصله‌ی تصادفیِ تازه از بازه‌ی تنظیم‌شده."""
+        self.apply_config()
+        lo, hi = self.gap_min, self.gap_max
+        if hi <= lo:
+            return lo
+        return random.uniform(lo, hi)
+
+    def floor_seconds(self):
+        """کفِ فاصله (کمینه‌ی بازه) — برای زمان‌بندی‌های قطعی."""
+        self.apply_config()
+        return self.gap_min
+
+    # ── وضعیتِ یک رکورد ──
+    def since_done(self, rec_id, now=None):
+        """چند ثانیه از آخرین عملکردِ تمام‌شده‌ی این رکورد گذشته است."""
+        if not rec_id:
+            return None
+        now = time.time() if now is None else float(now)
+        last = self._last_done.get(int(rec_id))
+        if last is None:
+            return None
+        return now - float(last)
+
+    def wait_for(self, rec_id, now=None):
+        """چند ثانیه دیگر باید صبر کرد تا نوبتِ این رکورد برسد (۰ = آماده)."""
+        if not rec_id:
+            return 0.0
+        now = time.time() if now is None else float(now)
+        rid = int(rec_id)
+        if rid in self._busy:
+            # عملکردی روی همین رکورد در جریان است — تا تمام‌شدنش صبر کن.
+            return max(1.0, self.gap_min)
+        left = self.since_done(rid, now)
+        if left is None:
+            return 0.0
+        # کفِ بازه (نه عدد تصادفی) مبناست تا «چقدر مانده» پایدار بماند؛
+        # خودِ زمان‌بندیِ نوبتِ بعدی (next_action_after) تصادفی است.
+        need = self.floor_seconds()
+        return max(0.0, need - left) if left < need else 0.0
+
+    def ready(self, rec_id, now=None):
+        return self.wait_for(rec_id, now) <= 0.0
+
+    def defer_if_due(self, rec, due_ts, now=None):
+        """رکوردِ سررسیدشده را اگر در خنک‌کننده/صف است به زمانِ درست منتقل می‌کند.
+
+        خروجی: ``(False, زمان_جدید)`` یعنی «الان نه» و زمانِ پیشنهادی برای
+        ست‌کردنِ ``next_reminder``/``next_check``؛ ``(True, 0)`` یعنی آزاد است.
+        """
+        if not rec:
+            return True, 0
+        now = time.time() if now is None else float(now)
+        w = self.wait_for(rec.get("id"), now)
+        if w <= 0:
+            return True, 0
+        try:
+            base = max(float(now), float(due_ts or 0))
+        except (TypeError, ValueError):
+            base = now
+        return False, int(base + max(1.0, w))
+
+    # ── اجرای یک عملکرد در صف سراسری ──
+    async def action(self, kind, rec_id=None, fn=None, *a, **kw):
+        """عملکرد را در صفِ سراسری اجرا می‌کند و خنک‌کننده‌ها را ثبت می‌کند.
+
+        ترتیب: (۱) اگر این رکورد خنک‌کننده دارد → صبر؛ (۲) قفل سراسری →
+        اگر از پایانِ آخرین عملکرد (سراسری یا همین رکورد) کمتر از فاصله
+        گذشته باشد → صبر؛ (۳) اجرا؛ (۴) ثبتِ زمانِ پایان برای رکورد و
+        برای کل صف.
+
+        نکته: فاصله **دوبار** جمع نمی‌شود. اگر خنک‌کننده‌ی رکورد به‌اندازه‌ی
+        کافی صبر کرده باشد، در قفل سراسری دیگر صبرِ اضافه نمی‌خورد؛ یعنی
+        از پایانِ عملکردِ قبلی دقیقاً یک فاصله (پیش‌فرض ۱۵–۲۰ ثانیه) می‌گذرد.
+        """
+        self.apply_config()
+        rid = int(rec_id) if rec_id else None
+        # ۱) خنک‌کننده‌ی خودِ رکورد: اگر همین رکورد تازه چک/جوین/پیام گرفته،
+        #    ابتدا همان‌قدر صبر می‌شود (پیش از صف رفتن).
+        t_before = time.time()
+        if rid is not None:
+            w = self.wait_for(rid)
+            if w > 0:
+                await asyncio.sleep(w)
+        waited_rec = time.time() - t_before
+        # ۲) صفِ سراسری
+        async with self._lock:
+            # مبنای «آخرین عملکرد» را **داخل** قفل می‌خوانیم؛ اگر بیرون
+            # خوانده شود، نوبتی که پشتِ قفل معطل مانده با مبنای کهنه صفر
+            # حساب می‌کند و عملکردِ بعدی درجا پشتِ قبلی می‌رود.
+            ref = self.last_global_done
+            if rid is not None:
+                ref = max(ref, float(self._last_done.get(rid, 0.0) or 0.0))
+            # صبری که بابت خنک‌کننده‌ی رکورد شده از فاصله‌ی صف کم می‌شود؛
+            # وگرنه فاصله دوبار روی هم جمع می‌شد (یک بار رکورد، یک بار صف)
+            # و نوبت‌ها بی‌دلیل دو برابر عقب می‌افتادند.
+            w = ref + self.seconds() - waited_rec - time.time()
+            if w > 0:
+                await asyncio.sleep(w)
+            try:
+                if fn is None:
+                    return None
+                if asyncio.iscoroutinefunction(fn):
+                    return await fn(*a, **kw)
+                return fn(*a, **kw)
+            finally:
+                done = time.time()
+                self.last_global_done = done
+                if rid is not None:
+                    self._last_done[rid] = done
+                    self._order.append(rid)
+                    if len(self._order) > 600:
+                        for k in self._order[:200]:
+                            self._last_done.pop(k, None)
+                        del self._order[:200]
+
+    def note_done(self, rec_id=None, now=None):
+        """پایانِ یک عملکرد را ثبت می‌کند بدون اینکه فاصله‌ی صف را تحمیل کند.
+
+        برای درخواستی است که ادامه‌ی همان عملکرد قبلی محسوب می‌شود (چکِ دومِ
+        تأییدیِ عضویت): فاصله‌ی واقعی را خودش داده (۱۵–۳۰ ثانیه)، پس یک
+        فاصله‌ی صفِ اضافه فقط توانِ کل را نصف می‌کرد.
+        """
+        now = time.time() if now is None else float(now)
+        self.last_global_done = now
+        if not rec_id:
+            return
+        rid = int(rec_id)
+        self._last_done[rid] = now
+        self._order.append(rid)
+        if len(self._order) > 600:
+            for k in self._order[:200]:
+                self._last_done.pop(k, None)
+            del self._order[:200]
+
+    def mark_done(self, rec_id, now=None):
+        """زمانِ پایانِ عملکردِ یک رکورد را دستی ثبت می‌کند (مثلاً بعد از جوین)."""
+        if not rec_id:
+            return
+        now = time.time() if now is None else float(now)
+        rid = int(rec_id)
+        self._last_done[rid] = now
+        self._order.append(rid)
+        self.last_global_done = max(self.last_global_done, now)
+        if len(self._order) > 600:
+            for k in self._order[:200]:
+                self._last_done.pop(k, None)
+            del self._order[:200]
+
+    def reset(self, rec_id=None):
+        """خنک‌کننده را پاک می‌کند (برای رکوردِ تازه یا تست)."""
+        if rec_id:
+            self._last_done.pop(int(rec_id), None)
+            self._busy.discard(int(rec_id))
+        else:
+            self._last_done.clear()
+            self._busy.clear()
+            self._order.clear()
+            self.last_global_done = 0.0
+
+    def status_text(self):
+        self.apply_config()
+        return (f"صف عملکرد: فاصله {fa(int(self.gap_min))}–{fa(int(self.gap_max))} "
+                f"ثانیه تصادفی بین دو عملکرد | "
+                f"رکوردهای در خنک‌کننده: {fa(len(self._last_done))}")
 
 
 class Throttle:
@@ -1301,6 +1552,8 @@ HELP = """🤖 راهنمای جفج
 تبادل اخطار ۲ — بعد از دو بار نبودنِ تأییدشده لفت بده (این پیام نیست؛ پیش‌فرض ۲)
 تبادل تعداد یادآوری ۲ — دو پیام «نیومدی» با فاصله؛ بعد از آن لفت (پیش‌فرض ۲؛ ۰ = بدون پیام)
 تبادل فاصله یادآوری ۲۰ ۴۰ — فاصله تصادفی بین دو پیام «نیومدی» (پیش‌فرض)
+تبادل فاصله عملکرد ۱۵ ۲۰ — هیچ دو عملکردی پشت‌سرهم نمی‌روند: چک/جوین/لفت/پیام
+                              یکی تمام شود، ۱۵–۲۰ ثانیه صبر، بعدی اجرا شود
 🧠 تطبیقی هوشمند — فاصله جوین با FloodWait و آپ‌تایم خودکار زیاد می‌شود
 تبادل تطبیقی — نمایش وضعیت (پایه + Flood + آپ‌تایم)
 تبادل تطبیقی روشن / خاموش — فعال/غیرفعال کردن تطبیقی (پیش‌فرض روشن)
@@ -2127,6 +2380,7 @@ class Engine:
             f"فاصله چک نگهبانی: {fa(check_min)}–{fa(check_max)} ثانیه تصادفی (هر بار دوباره رندوم)",
             "  با سن رکورد پلکانی بلند می‌شود: تا ۳۰دقیقه ×۱، تا ۲ساعت ×۲، تا ۶ساعت ×۴، بعدش ×۸",
             f"فاصله «نیومدی»: {fa(rem_min)}–{fa(rem_max)} ثانیه تصادفی — دوبار می‌گوید بعد لفت",
+            f"صف تک‌عملکردی: هیچ دو عملکردی پشت‌سرهم نمی‌روند — {fa(int(x.get('op_gap_min_sec', 15) or 0))}–{fa(int(x.get('op_gap_max_sec', 20) or 0))} ثانیه صبر بعد از هر عملکرد (چک/جوین/لفت/پیام)",
             f"لفت: بعد از {fa(strikes)} بار نبودنِ تأییدشده (هرکدام با چک دوم) — نه با یک منفیِ تنها",
             "",
             f"📊 الان {fa(joined_cnt)} کانال جوین‌شده تحت نظر نگهبانی",
@@ -2136,6 +2390,7 @@ class Engine:
             "`تبادل بررسی ۱۵ ۳۰` → فاصله چک عضویت (پیش‌فرض ۱۵-۳۰ ثانیه، هر بار رندوم)",
             "`تبادل اخطار ۲` → بعد چند بار نبودن لفت بده (پیش‌فرض ۲)",
             "`تبادل فاصله یادآوری ۲۰ ۴۰` → فاصله دو پیام «نیومدی»",
+            "`تبادل فاصله عملکرد ۱۵ ۲۰` → فاصله بین هر دو عملکرد (چک/جوین/لفت/پیام)",
             "`تبادل دائمی روشن/خاموش`",
             "`تبادل دائمی ساعت 0` → ۰=تا ابد، ۲۴=فقط ۲۴ ساعت چک کن (پیش‌فرض ۲۴)",
             "`تبادل دائمی` → نمایش همین صفحه",
@@ -2450,6 +2705,10 @@ class Engine:
             ("گزارش", "report"),
             ("فاصله یادآوری", "reminder_gap"),
             ("نوسان یادآوری", "reminder_gap"),
+            ("فاصله عملکرد", "op_gap"),
+            ("فاصله عملکردها", "op_gap"),
+            ("فاصله عملیات", "op_gap"),
+            ("صف عملکرد", "op_gap"),
             ("فاصله تبادل", "gap"),
             ("زمان تبادل", "gap"),
             ("عمق اسکن", "scanlimit"),
@@ -2515,6 +2774,10 @@ class Engine:
             "انتخاب": "scan_pick", "زمان پاسخ": "response_delay", "تأخیر پاسخ": "response_delay",
             "یادآوری": "reminder_gap", "فاصله یادآوری": "reminder_gap",
             "نوسان یادآوری": "reminder_gap", "تعداد یادآوری": "max_reminders",
+            "عملکرد": "op_gap", "عملکردها": "op_gap",
+            "فاصله عملکرد": "op_gap", "فاصله عملکردها": "op_gap",
+            "فاصله عملیات": "op_gap", "صف عملکرد": "op_gap",
+            "opgap": "op_gap", "op_gap": "op_gap",
             "حداکثر یادآوری": "max_reminders",
             "سن لینک": "scan_age", "حداکثر سن لینک": "scan_age",
             "گزارش": "report", "گزارش لحظه‌ای": "report_live",
@@ -2913,6 +3176,57 @@ class Engine:
             self.st.save()
             self.join_thr.apply({"min_gap_sec": lo, "max_gap_sec": hi, "max_per_hour": 0})
             return f"⏱ فاصله جوین: **{fa(lo)}–{fa(hi)} ثانیه**"
+
+        if sub == "op_gap":
+            if not rest:
+                lo = int(x.get("op_gap_min_sec", 15) or 0)
+                hi = int(x.get("op_gap_max_sec", 20) or lo)
+                return (f"⏳ فاصله بین عملکرد‌های تبادل: {fa(lo)} تا {fa(hi)} ثانیه تصادفی\n"
+                        "در هر لحظه فقط **یک** عملکرد (چک عضویت / جوین / لفت / «نیومدی» / «جوین شدم»)\n"
+                        "اجرا می‌شود؛ بعد از تمام‌شدنش همین‌قدر صبر می‌شود و بعد نوبتِ بعدی.\n"
+                        "روی هر رکورد هم رعایت می‌شود: مثلاً بعد از جوین، چکِ عضویت زودتر از این نمی‌رود\n"
+                        "و دو پیام «نیومدی» پشت‌سرهم نمی‌افتند.\n\n"
+                        "`تبادل فاصله عملکرد ۱۵ ۲۰` (پیش‌فرض)  |  `تبادل فاصله عملکرد ۲۵` (ثابت)")
+            rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
+            try:
+                ns = [num(v) for v in rest.split()]
+                if len(ns) == 1:
+                    lo = max(1, min(3600, ns[0]))
+                    hi = lo
+                else:
+                    lo = max(1, min(3600, ns[0]))
+                    hi = max(lo, min(3600, ns[1]))
+            except (ValueError, IndexError):
+                return "فرمت: `تبادل فاصله عملکرد ۱۵ ۲۰`"
+            x["op_gap_min_sec"] = lo
+            x["op_gap_max_sec"] = hi
+            # کفِ فاصله‌ها هم با همین بازه بالا می‌رود تا هیچ عملکردی
+            # کوتاه‌تر از فاصله‌ی درخواستی کاربر پشت‌سرهم نرود.
+            if int(x.get("reminder_min_sec", 0) or 0) < lo:
+                x["reminder_min_sec"] = lo
+            if int(x.get("reminder_max_sec", 0) or 0) < x["reminder_min_sec"]:
+                x["reminder_max_sec"] = x["reminder_min_sec"]
+            if int(x.get("check_min_sec", 0) or 0) < lo:
+                x["check_min_sec"] = lo
+            if int(x.get("check_max_sec", 0) or 0) < x["check_min_sec"]:
+                x["check_max_sec"] = x["check_min_sec"]
+            # نوبت‌های معطلِ در دیتابیس هم از حالا روی زمانِ درست بیفتند.
+            nowg = int(time.time())
+            for r in self.db._x("SELECT * FROM exchange WHERE next_reminder>0"
+                                " OR next_check>0 LIMIT 300", (), "all"):
+                kw = {}
+                if int(r.get("next_reminder") or 0) > 0:
+                    kw["next_reminder"] = max(int(r["next_reminder"]), nowg + lo)
+                if int(r.get("next_check") or 0) > 0:
+                    kw["next_check"] = max(int(r["next_check"]), nowg + lo)
+                if kw:
+                    self.db.ex_set(r["id"], **kw)
+            self.st.save()
+            shown = (f"{fa(lo)} ثانیه" if lo == hi
+                     else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
+            return (f"⏳ فاصله بین عملکرد‌های تبادل: **{shown}**\n"
+                    "هیچ دو عملکردی (چک/جوین/لفت/پیام) پشت‌سرهم نمی‌روند — "
+                    "اولی تمام می‌شود، این‌قدر صبر، بعد دومی.")
 
         if sub == "reminder_gap":
             if not rest:
@@ -3326,6 +3640,7 @@ class Engine:
             f"پیام عضو‌نشده: حداکثر {fa(max(0, int(x.get('max_reminders', 2) or 0)))} بار «نیومدی» با فاصله تصادفی؛ بعد از آن لفت",
             f"فاصله یادآوری «نیومدی»: {fa(x.get('reminder_min_sec', 20))} تا {fa(x.get('reminder_max_sec', 40))} ثانیه تصادفی (هر بار دوباره رندوم)",
             f"چک عضویت: {fa(x.get('check_min_sec', 15))}–{fa(x.get('check_max_sec', 30))} ثانیه (پلکانی با سن رکورد) | لفت بعد {fa(x.get('max_strikes', 2))} نبودنِ تأییدشده | {perm_label}   `تبادل دائمی`",
+            f"صف عملکرد: در هر لحظه فقط یک عملکرد (چک/جوین/لفت/پیام)؛ بین دو عملکرد {fa(x.get('op_gap_min_sec', 15))}–{fa(x.get('op_gap_max_sec', 20))} ثانیه صبر   `تبادل فاصله عملکرد`",
             f"پاسخ بعد از Join واقعی: {fa(x.get('response_delay_sec', 15))} ثانیه",
             f"انتخاب پیام: مورد {fa(x.get('scan_pick', 2) or 2)} از جدیدترین‌ها",
             f"اسکن گروه: هر {secs(max(30, int(x.get('scan_every_sec', 30) or 30)))}",
@@ -4523,6 +4838,12 @@ async def connect_and_run(eng, creds):
     _warn_check = {"last": 0}
     _warn_check_flood = {"last": 0}
     check_gate = CheckGate()
+    # صفِ تک‌عملکردی تبادل: هیچ دو عملکردی (چک/جوین/لفت/پیام) همزمان یا
+    # پشت‌سرهمِ بدون فاصله اجرا نمی‌شوند. قبل از تعریف تابع‌های چک ساخته
+    # می‌شود تا همه‌ی مسیرها از یک دریچه رد شوند.
+    ex_cd = ExCooldown(cfg=eng.ex_cfg,
+                       gap_min=eng.ex_cfg().get("op_gap_min_sec", 15),
+                       gap_max=eng.ex_cfg().get("op_gap_max_sec", 20))
 
     async def warn_membership_check_broken(now):
         """هشدارِ یک‌بار در ۱۰ دقیقه: چک عضویت مدتی است بی‌نتیجه است.
@@ -4902,9 +5223,13 @@ async def connect_and_run(eng, creds):
     # ══════════════════════════════════════════════════
     #  تبادل دوطرفه
     # ══════════════════════════════════════════════════
-    async def peer_in_my_channel(user_id):
+    async def peer_in_my_channel(user_id, rec_id=None, queue=True):
         """عضو کانال عادی یا VIP هست؟ True / False / None(نامشخص)
-        همه‌ی درخواست‌ها از CheckGate رد می‌شوند تا فلود «الکی» نسازد."""
+        همه‌ی درخواست‌ها از CheckGate رد می‌شوند تا فلود «الکی» نسازد.
+        از صفِ تک‌عملکردی (ex_cd) هم رد می‌شوند: در هر لحظه فقط یک عملکردِ
+        تبادل اجرا می‌شود و بین دو عملکرد، فاصله‌ی تنظیم‌شده (پیش‌فرض
+        ۱۵–۲۰ ثانیه) رعایت می‌شود. rec_id برای خنک‌کننده‌ی همان رکورد است
+        تا رکوردی که همین الان چک شده، دوباره چک نشود."""
         if not user_id:
             return None
         chans = []
@@ -4923,8 +5248,26 @@ async def connect_and_run(eng, creds):
             if w > 0:
                 await asyncio.sleep(w)
             check_gate.record()
+
+            async def _one_req():
+                return await client(GetParticipantRequest(ch, user_id))
+
             try:
-                await client(GetParticipantRequest(ch, user_id))
+                # یک «عملکرد» در صف سراسری: تا عملکرد قبلی تمام نشده و
+                # فاصله‌ی تنظیم‌شده نگذشته باشد، درخواستِ بعدی زده نمی‌شود.
+                # queue=False فقط برای «چک دومِ تأییدی» همان عضویت است: آنجا
+                # خودِ فاصله‌ی چک (۱۵–۳۰ ثانیه) بین دو درخواست صبر شده، پس
+                # یک‌بار فاصله‌ی صفِ اضافه فقط توان را نصف می‌کرد.
+                if queue:
+                    await ex_cd.action("check", rec_id, _one_req)
+                else:
+                    # ادامه‌ی همان عملکردِ چک: فقط قفل سراسری را می‌گیرد (تا
+                    # با عملکردِ دیگری هم‌پوشانی نکند) ولی فاصله‌ی صف را
+                    # دوباره صبر نمی‌کند — آن فاصله را خودش همین الان داده.
+                    async with ex_cd.lock:
+                        out = await _one_req()
+                        ex_cd.note_done(rec_id)
+                    return out if out is not None else True
                 return True
             except UserNotParticipantError:
                 saw_false = True
@@ -4950,26 +5293,39 @@ async def connect_and_run(eng, creds):
                 return None
         return False if saw_false else None
 
-    async def confirm_peer_membership(user_id, fast=False):
+    async def confirm_peer_membership(user_id, fast=False, rec_id=None):
         """عضویت را حداقل دوبار تأیید می‌کند تا منفی کاذب ندهد.
         اگر درخواست اول False باشد، یک بار دیگر بعد از فاصله تصادفی
         تنظیم‌شده بررسی می‌شود؛ هیچ پیام اضافه‌ای در این فاصله ارسال نمی‌شود.
         fast=True برای نوبت‌های یادآوری است: چکِ دوم فقط چند ثانیه است تا
         فاصله‌ی چک عضویت روی بازه‌ی تنظیم‌شده‌ی کاربر جمع نشود — فاصله‌ی
         واقعی بین دو پیام «نیومدی» همان بازه‌ی تنظیم‌شده می‌ماند.
+
+        rec_id که داده شود، هر دو درخواست از صفِ تک‌عملکردی رد می‌شوند و
+        خنک‌کننده‌ی همان رکورد ثبت می‌شود: یعنی رکوردی که تازه جوین/چک
+        شده، تا ۱۵–۲۰ ثانیه (پیش‌فرض) دوباره چک نمی‌شود و بلافاصله بعد
+        از چک هم پیامی نمی‌رود.
         """
-        first = await peer_in_my_channel(user_id)
+        first = await peer_in_my_channel(user_id, rec_id)
         if first is not False:
             return first
         # گاهی انتشار عضویت در API تلگرام چند ثانیه طول می‌کشد.
+        # این صبرِ بی‌صدا بیرونِ قفل سراسری است تا بقیه‌ی رکوردها معطل نمانند.
         await asyncio.sleep(2 if fast else membership_check_delay())
-        return await peer_in_my_channel(user_id)
+        # چک دوم در ادامه‌ی همان عملکردِ چک است (نه یک عملکردِ تازه)، پس
+        # دوباره پشتِ فاصله‌ی صف نمی‌ایستد؛ فقط خنک‌کننده‌ی رکورد تازه می‌شود.
+        return await peer_in_my_channel(user_id, rec_id, queue=False)
 
-    async def join_link(link):
-        """جوین به کانال. برمی‌گرداند (موفق, پیام, عنوان)"""
+    async def join_link(link, rec_id=None):
+        """جوین به کانال. برمی‌گرداند (موفق, پیام, عنوان)
+
+        rec_id که داده شود، جوین در صفِ تک‌عملکردی اجرا می‌شود و
+        خنک‌کننده‌ی همان رکورد ثبت می‌شود؛ یعنی چکِ عضویتِ بعد از جوین
+        زودتر از فاصله‌ی تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) انجام نمی‌شود."""
         if DRY_RUN:
             return True, "joined", "DRY_RUN"
-        try:
+
+        async def _do_join():
             if is_invite(link):
                 upd = await client(ImportChatInviteRequest(invite_hash(link)))
                 title = ""
@@ -4980,6 +5336,11 @@ async def connect_and_run(eng, creds):
             ent = await client.get_entity(link)
             await client(JoinChannelRequest(ent))
             return True, "joined", getattr(ent, "title", "")
+
+        try:
+            # جوین یک «عملکرد» است: تا عملکرد قبلی تمام نشده و فاصله‌ی
+            # تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) نگذشته باشد، اجرا نمی‌شود.
+            return await ex_cd.action("join", rec_id, _do_join)
 
         except UserAlreadyParticipantError:
             return True, "already", ""
@@ -5011,13 +5372,22 @@ async def connect_and_run(eng, creds):
         except Exception as e:
             return False, f"{type(e).__name__}: {e}", ""
 
-    async def leave_link(link):
+    async def leave_link(link, rec_id=None):
+        """لفت از کانال طرف — یک «عملکرد» در صفِ تک‌عملکردی.
+
+        با rec_id، لفت بلافاصله بعد از چک/پیام اجرا نمی‌شود: اول
+        خنک‌کننده‌ی رکورد (پیش‌فرض ۱۵–۲۰ ثانیه) تمام می‌شود. این همان
+        باگِ «چک کرد، درجا گفت نیومدی، درجا لفت داد» را می‌بندد."""
         if DRY_RUN:
             return True, ""
-        try:
+
+        async def _do_leave():
             ent = await client.get_entity(link)
             await client(LeaveChannelRequest(ent))
             return True, ""
+
+        try:
+            return await ex_cd.action("leave", rec_id, _do_leave)
         except FloodWaitError as e:
             w = getattr(e, "seconds", 60)
             eng.join_thr.penalize(w)
@@ -5062,10 +5432,20 @@ async def connect_and_run(eng, creds):
         else:
             delay = response_delay_seconds()
         if delay:
+            # تأخیر انسانی بیرونِ صف است تا بقیه‌ی عملکردها معطل نمانند؛
+            # فقط خودِ ارسال داخل صف تک‌عملکردی می‌رود.
             await asyncio.sleep(delay)
+
+        async def _send_reply():
+            if DRY_RUN:
+                return True
+            await client.send_message(chat, body, reply_to=mid, link_preview=False)
+            return True
+
         try:
-            if not DRY_RUN:
-                await client.send_message(chat, body, reply_to=mid, link_preview=False)
+            # پیام «جوین شدم» هم یک عملکرد است: درجا بعد از جوین یا بعد از
+            # یک «نیومدی» نمی‌رود؛ اول نوبتِ صف و فاصله‌ی تنظیم‌شده.
+            await ex_cd.action("reply_joined", rec.get("id"), _send_reply)
             eng.db.ex_set(rec["id"], replied=1)
             eng.log("ok", "ex_reply" if not DRY_RUN else "dry_run_reply",
                     f"#{rec['id']}")
@@ -5078,22 +5458,64 @@ async def connect_and_run(eng, creds):
         # عمداً هیچ سقف روزانه‌ای برای Join وجود ندارد.
         return 999999999
 
+    def op_gap_seconds():
+        """فاصله‌ی تصادفی بین دو «عملکرد» تبادل (پیش‌فرض ۱۵–۲۰ ثانیه).
+
+        هر عملکرد (چک عضویت، جوین، لفت، پیام «نیومدی»، پیام «جوین شدم»)
+        که تمام شود، این‌قدر صبر می‌شود تا عملکردِ بعدی اجرا شود. این
+        کفِ همه‌ی فاصله‌هاست: هیچ دو عملکردی پشت‌سرهم (درجا) نمی‌روند.
+        """
+        x = eng.ex_cfg()
+        lo = max(0, int(x.get("op_gap_min_sec", 15) or 0))
+        hi = max(lo, int(x.get("op_gap_max_sec", 20) or lo))
+        if lo == hi:
+            return lo
+        return random.randint(lo, hi)
+
+    def next_action_after(rec, base=None):
+        """زمانِ مجازِ عملکردِ بعدی روی این رکورد.
+
+        حداکثرِ «زمانِ پایه» و «پایانِ خنک‌کننده‌ی رکورد» را برمی‌گرداند؛
+        یعنی رکوردی که همین الان جوین/چک/پیام گرفته، عملکردِ بعدی‌اش
+        زودتر از فاصله‌ی تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) اجرا نمی‌شود.
+        """
+        now = int(time.time())
+        try:
+            base = now if base is None else int(max(now, int(base or 0)))
+        except (TypeError, ValueError):
+            base = now
+        gap = op_gap_seconds()
+        since = ex_cd.since_done((rec or {}).get("id"), now)
+        if since is None:
+            return base
+        return int(max(base, now + max(0, int(gap - since))))
+
     def reminder_delay():
         """فاصله‌ی تصادفی بین دو پیام «نیومدی»؛ پیش‌فرض ۲۰ تا ۴۰ ثانیه تصادفی.
         هر بار که بخواهد بگوید بین همون عدد تصادفی که تنظیم کردی (پیش‌فرض ۲۰–۴۰)
         است، دوبار می‌گوید بعد لفت.
-        دو پیام عضو‌نشده هرگز پشت سر هم فرستاده نمی‌شوند."""
+        دو پیام عضو‌نشده هرگز پشت سر هم فرستاده نمی‌شوند: کفِ فاصله همان
+        فاصله‌ی بین عملکرد‌هاست (پیش‌فرض ۱۵ ثانیه)، حتی اگر بازه‌ی یادآوری
+        کوتاه‌تر تنظیم شده باشد."""
         x = eng.ex_cfg()
         # اگر کاربر فقط چک را تنظیم کرده، یادآوری هم از همان بازه استفاده کند
+        floor = max(0, int(x.get("op_gap_min_sec", 15) or 0))
         lo = max(1, int(x.get("reminder_min_sec", x.get("check_min_sec", 20)) or 20))
         hi = max(lo, int(x.get("reminder_max_sec", x.get("check_max_sec", 40)) or 40))
+        lo = max(lo, floor)
+        hi = max(hi, lo)
         return random.randint(lo, hi)
 
     def membership_check_delay():
-        """فاصله بی‌صدای بررسی عضویت؛ هر بار دوباره تصادفی انتخاب می‌شود."""
+        """فاصله‌ی بی‌صدای بررسی عضویت؛ هر بار دوباره تصادفی انتخاب می‌شود.
+        کفِ آن فاصله‌ی بین عملکرد‌هاست (پیش‌فرض ۱۵ ثانیه) تا چکِ عضویت هرگز
+        درجا بعد از جوین اجرا نشود — اول صبر، بعد چک."""
         x = eng.ex_cfg()
+        floor = max(0, int(x.get("op_gap_min_sec", 15) or 0))
         lo = max(1, int(x.get("check_min_sec", 15) or 15))
         hi = max(lo, int(x.get("check_max_sec", 30) or 30))
+        lo = max(lo, floor)
+        hi = max(hi, lo)
         return random.randint(lo, hi)
 
     def watch_delay_seconds(rec):
@@ -5192,6 +5614,20 @@ async def connect_and_run(eng, creds):
             eng.log("info", "ex_reminder_cap",
                     f"#{rec['id']} total={rec.get('reminders_total')} >= {_max_rem}")
             return False
+        # ── دروازه‌ی سراسریِ «پشت‌سرهم نرو» ──
+        # این تابع تنها نقطه‌ی ارسال «نیومدی» است، پس محافظِ قطعی همین‌جاست:
+        # اگر کمتر از فاصله‌ی بین عملکرد‌ها (پیش‌فرض ۱۵–۲۰ ثانیه) از آخرین
+        # عملکردِ این رکورد گذشته باشد، پیام نمی‌رود. در این حالت نوبتِ
+        # بعدی کمی جلو می‌افتد تا دوباره تلاش شود — بدون سوزاندنِ شمارنده‌ی
+        # یادآوری و بدون لفتِ زودهنگام. (باگِ «دو تا نیومدی درجا» همین‌جا
+        # بسته می‌شود، چون هر سه مسیر ارسال از این تابع رد می‌شوند.)
+        wait_op = ex_cd.wait_for(rec.get("id"))
+        if wait_op > 0:
+            nxt = int(time.time() + max(1, int(wait_op) + 1))
+            eng.db.ex_set(rec["id"], next_reminder=nxt,
+                          note="در صف عملکرد — «نیومدی» کمی دیگر می‌رود")
+            eng.log("info", "ex_reminder_gap", f"#{rec['id']} wait={int(wait_op)}s")
+            return False
         # لینک طرف فقط برای placeholder {channel} اگر کاربر خودش خواسته باشد
         # استفاده می‌شود؛ اما auto-append لینک طرف هرگز انجام نمی‌شود.
         link = (rec.get("link") or "").strip()
@@ -5199,10 +5635,18 @@ async def connect_and_run(eng, creds):
         chat, mid = rec.get("src_chat"), rec.get("src_msg")
         if not body or not chat or not mid:
             return False
-        try:
-            if not DRY_RUN:
-                await client.send_message(chat, body, reply_to=mid, link_preview=False)
+
+        async def _send_reminder():
+            if DRY_RUN:
+                return True
+            await client.send_message(chat, body, reply_to=mid, link_preview=False)
             return True
+
+        try:
+            # ارسال هم یک «عملکرد» است: در صفِ سراسری اجرا می‌شود و
+            # خنک‌کننده‌ی این رکورد را ثبت می‌کند تا عملکردِ بعدی
+            # (چک / لفت / پیام دوم) درجا پشتِ این نیفتد.
+            return bool(await ex_cd.action("reminder", rec.get("id"), _send_reminder))
         except Exception as e:
             eng.log("warn", "ex_reminder", f"#{rec['id']}: {type(e).__name__}: {e}")
             return False
@@ -5353,10 +5797,16 @@ async def connect_and_run(eng, creds):
 
         # ── آیا عضو کانال من هست؟ ──
         # یک False منفرد را نتیجه قطعی نگیر؛ قبل از پیام ناموفق دوباره تأیید کن.
-        member = await confirm_peer_membership(sender.id)
         # رکورد تبادلِ همین طرف (در مسیرهای پایین پر می‌شود)؛ say برای
         # ثبتِ پرچم replied به آن نیاز دارد.
         rec = None
+        # اگر برای این طرف رکوردی داریم، چک با شناسه‌ی همان رکورد در صفِ
+        # تک‌عملکردی می‌رود: رکوردی که همین الان جوین/چک/پیام گرفته، دوباره
+        # چک نمی‌شود («اگه توی چک کردن قبلی‌ها بود، همین الان دوباره چک نکن»)
+        # و خنک‌کننده‌ی ۱۵–۲۰ ثانیه‌ایِ بعد از چک هم ثبت می‌شود.
+        rec_pre = eng.db.ex_by_peer(getattr(sender, "id", 0) or 0)
+        member = await confirm_peer_membership(
+            sender.id, rec_id=(rec_pre or {}).get("id"))
 
         async def say(key, channel="", fallbacks=()):
             if not x["reply"]:
@@ -5383,8 +5833,15 @@ async def connect_and_run(eng, creds):
             # بازه‌ی ۱۱–۴۸ ثانیه) و از این تأخیر عبور نمی‌کند.
             if key in ("msg_no", "msg_wait", "msg_nolink"):
                 await asyncio.sleep(reply_delay_seconds())
+
+            async def _do_reply():
+                return await event.reply(t)
+
             try:
-                await event.reply(t)
+                # پاسخ مستقیم هم یک عملکرد است: تا عملکرد قبلی (چک عضویت،
+                # جوین، «نیومدی» قبلی) تمام نشده و فاصله‌ی تنظیم‌شده
+                # (پیش‌فرض ۱۵–۲۰ ثانیه) نگذشته باشد، ارسال نمی‌شود.
+                await ex_cd.action("say", (rec or {}).get("id"), _do_reply)
                 eng.log("info", "ex_reply_attempt", f"{sender_name} [{used}]")
                 # پرچم replied=1 تا همین پیام دوباره ارسال نشود (هر شخص فقط یک بار)
                 # برای پیام‌های مستقیم رویداد ضروری است.
@@ -5479,9 +5936,12 @@ async def connect_and_run(eng, creds):
                 joined_rec = rec_now.get("status") == "joined"
                 if sent_now or (not joined_rec
                                 and not int(rec_now.get("next_reminder") or 0)):
+                    # نوبتِ «نیومدی» بعدی هرگز درجا پشتِ پیامِ قبلی یا پشتِ
+                    # چکِ عضویتی که همین الان انجام شد نمی‌افتد.
                     eng.db.ex_set(rec["id"], reminders=new_count,
                                   reminders_total=total_sent + (1 if sent_now else 0),
-                                  next_reminder=int(time.time()) + reminder_delay())
+                                  next_reminder=next_action_after(
+                                      rec_now, int(time.time()) + reminder_delay()))
             return
 
         # ── نامشخص ──
@@ -5511,8 +5971,9 @@ async def connect_and_run(eng, creds):
                                   peer_id=sender.id, peer_name=sender_name,
                                   src_chat=event.chat_id, src_msg=event.id,
                                   replied=0, strikes=0,
-                                  next_reminder=int(time.time())
-                                  + membership_check_delay(),
+                                  next_reminder=next_action_after(
+                                      rec0, int(time.time())
+                                      + membership_check_delay()),
                                   note="عضویت نامشخص — دوباره چک می‌کنم")
                     eng.log("info", "ex_unknown_recheck",
                             f"{sender_name} → {link or rec0.get('link')}")
@@ -5781,10 +6242,22 @@ async def connect_and_run(eng, creds):
                 for rec in eng.db.ex_reminder_due(now_rem, 20):
                     if not rec.get("peer_id"):
                         continue
+                    # ── صفِ تک‌عملکردی: نوبتِ این رکورد رسیده یا نه؟ ──
+                    # اگر عملکردی روی همین رکورد در جریان است (چک نگهبانی،
+                    # جوین، پیام قبلی) یا کمتر از فاصله‌ی تنظیم‌شده
+                    # (پیش‌فرض ۱۵–۲۰ ثانیه) از تمام‌شدنش گذشته، هیچ کاری
+                    # نمی‌کنیم و نوبت را به زمانِ درست منتقل می‌کنیم. این
+                    # همان باگِ «چک کرد و درجا گفت نیومدی» را می‌بندد.
+                    ok_turn, defer_ts = ex_cd.defer_if_due(rec, rec.get("next_reminder"))
+                    if not ok_turn:
+                        eng.db.ex_set(rec["id"], next_reminder=defer_ts,
+                                      note="عملکرد قبلی در جریان/تازه تمام شده — صبر")
+                        continue
                     # چک سریع: فاصله‌ی بررسی عضویت (۱۵–۳۰ ثانیه) روی
                     # بازه‌ی تنظیم‌شده‌ی «فاصله یادآوری» کاربر جمع نشود.
                     still = await confirm_peer_membership(rec["peer_id"],
-                                                          fast=True)
+                                                          fast=True,
+                                                          rec_id=rec["id"])
                     now2 = int(time.time())
                     max_rem = max(0, min(3, int(x.get("max_reminders", 2) or 0)))
                     if still is True:
@@ -5807,9 +6280,12 @@ async def connect_and_run(eng, creds):
                             sent = await send_not_joined_reminder(rec)
                             if sent:
                                 count += 1
+                                # نوبتِ بعدی هرگز زودتر از پایانِ خنک‌کننده‌ی
+                                # رکورد نیست: «نیومدی» دوم درجا پشتِ اولی نمی‌رود.
                                 eng.db.ex_set(rec["id"], reminders=count,
                                               strikes=0, unk_streak=0,
-                                              next_reminder=int(now2 + reminder_delay()),
+                                              next_reminder=next_action_after(
+                                                  rec, now2 + reminder_delay()),
                                               note="یادآوری ارسال شد")
                             else:
                                 # فیکس: اگر ارسال پیام ممکن نشد (ریپلای
@@ -5821,22 +6297,28 @@ async def connect_and_run(eng, creds):
                                 if fails >= 3:
                                     eng.db.ex_set(rec["id"], reminders=max_rem,
                                                   strikes=fails,
-                                                  next_reminder=int(now2 + 5),
+                                                  next_reminder=next_action_after(
+                                                      rec, now2 + 5),
                                                   note="ارسال یادآوری نشد — رفتن به مرحله لفت")
                                     eng.log("warn", "ex_remind_fail",
                                             f"#{rec['id']} {rec['link']} — ۳ تلاش ناموفق")
                                 else:
                                     eng.db.ex_set(rec["id"], strikes=fails,
-                                                  next_reminder=int(now2 + reminder_delay()),
+                                                  next_reminder=next_action_after(
+                                                      rec, now2 + reminder_delay()),
                                                   note=f"یادآوری ارسال نشد — تلاش {fa(fails)} از ۳")
                         elif max_rem == 0:
                             # «بدون پیام»: فقط بی‌صدای عضویت را چک می‌کنیم.
                             eng.db.ex_set(rec["id"],
-                                          next_reminder=int(now2 + membership_check_delay()),
+                                          next_reminder=next_action_after(
+                                              rec, now2 + membership_check_delay()),
                                           note="بدون پیام — بررسی بی‌صدای عضویت")
                         elif rec.get("status") == "joined":
                             # هر دو یادآوری رفت و طرف نیامد → لفت از کانالش.
-                            ok, err = await leave_link(rec["link"])
+                            # rec_id داده می‌شود تا لفت در صفِ تک‌عملکردی برود:
+                            # درجا بعد از آخرین «نیومدی» لفت نمی‌دهد، اول
+                            # فاصله‌ی تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) صبر می‌کند.
+                            ok, err = await leave_link(rec["link"], rec["id"])
                             eng.db.ex_set(rec["id"],
                                           status="left" if ok else "failed",
                                           next_reminder=0,
@@ -5865,7 +6347,7 @@ async def connect_and_run(eng, creds):
                             # ثانیه دیگر دوباره. قبلاً همین‌جا رکوردها در
                             # حالت «نامشخص» می‌چرخیدند و لفت عقب می‌افتد.
                             eng.db.ex_set(rec["id"],
-                                          next_reminder=int(now2 + 60),
+                                          next_reminder=next_action_after(rec, now2 + 60),
                                           note="فلود بررسی — ۶۰ ثانیه صبر")
                             continue
                         # قبلاً همین‌جا تا ابد با فاصله کوتاه دوباره چک
@@ -5877,12 +6359,13 @@ async def connect_and_run(eng, creds):
                         unk = int(rec.get("unk_streak") or 0) + 1
                         if unk >= 5:
                             eng.db.ex_set(rec["id"], unk_streak=unk,
-                                          next_reminder=int(now2 + 600),
+                                          next_reminder=next_action_after(rec, now2 + 600),
                                           note="بررسی عضویت مدتی است نامشخص — ۱۰ دقیقه صبر")
                             await warn_membership_check_broken(now2)
                         else:
                             eng.db.ex_set(rec["id"], unk_streak=unk,
-                                          next_reminder=int(now2 + membership_check_delay()),
+                                          next_reminder=next_action_after(
+                                              rec, now2 + membership_check_delay()),
                                           note="بررسی عضویت نامشخص است")
 
                 # ۳) چک دوره‌ای نگهبانی: طرف هنوز عضو کانال من هست؟
@@ -5892,6 +6375,18 @@ async def connect_and_run(eng, creds):
                 # نه با یک منفیِ تنها؛ نتیجه‌های «نامشخص» (فلود/خطا) اصلاً
                 # جزو اخطارها حساب نمی‌شوند.
                 for rec in eng.db.ex_due(int(time.time()), 5):
+                    # ── صفِ تک‌عملکردی: رکوردی که همین الان جوین/چک/پیام
+                    # گرفته، دوباره چک نمی‌شود. عملکردِ در جریان یا
+                    # خنک‌کننده‌ی تمام‌نشده (پیش‌فرض ۱۵–۲۰ ثانیه) یعنی
+                    # «الان نه» — نوبت به زمانِ درست منتقل می‌شود و هیچ
+                    # پیامی هم نمی‌رود. باگِ «جوین شد و درجا چک شد و درجا
+                    # نیومدی رفت» همین‌جا بسته می‌شود.
+                    ok_watch, defer_w = ex_cd.defer_if_due(rec, rec.get("next_check"))
+                    if not ok_watch:
+                        eng.db.ex_set(rec["id"], last_check=int(time.time()),
+                                      next_check=defer_w,
+                                      note="در صف عملکرد — چکِ بعدی کمی دیگر")
+                        continue
                     if not rec["peer_id"]:
                         now_no_peer = int(time.time())
                         eng.db.ex_set(rec["id"], last_check=now_no_peer,
@@ -5913,11 +6408,13 @@ async def connect_and_run(eng, creds):
                         eng.db.ex_set(rec["id"], last_check=now_skip,
                                       next_check=now_skip + watch_delay_seconds(rec))
                         continue
-                    still = await confirm_peer_membership(rec["peer_id"])
+                    still = await confirm_peer_membership(rec["peer_id"],
+                                                          rec_id=rec["id"])
                     now = int(time.time())
                     if still is True:
                         eng.db.ex_set(rec["id"], last_check=now,
-                                      next_check=now + watch_delay_seconds(rec),
+                                      next_check=next_action_after(
+                                          rec, now + watch_delay_seconds(rec)),
                                       strikes=0, unk_streak=0, reminders_total=0,
                                       note="عضو است")
                     elif still is False:
@@ -5940,14 +6437,16 @@ async def connect_and_run(eng, creds):
                                           reminders=1 if sent0 else 0,
                                           reminders_total=(int(rec.get("reminders_total") or 0)
                                                            + (1 if sent0 else 0)),
-                                          next_reminder=nowf + reminder_delay(),
+                                          next_reminder=next_action_after(
+                                              rec, nowf + reminder_delay()),
                                           note="نیومد — دور «نیومدی» شروع شد (چک نگهبانی)")
                             eng.log("info", "ex_first_miss",
                                     f"#{rec['id']} {rec['link']}")
                             await asyncio.sleep(2)
                             continue
                         if st >= x["max_strikes"]:
-                            ok, err = await leave_link(rec["link"])
+                            # لفت در صفِ تک‌عملکردی: درجا بعد از چک/پیام نیست.
+                            ok, err = await leave_link(rec["link"], rec["id"])
                             eng.db.ex_set(rec["id"],
                                           status="left" if ok else "failed",
                                           last_check=now, next_check=0,
@@ -5977,7 +6476,8 @@ async def connect_and_run(eng, creds):
                                     reminded += 1
                                     extra_total = 1
                             eng.db.ex_set(rec["id"], last_check=now,
-                                          next_check=now + watch_delay_seconds(rec),
+                                          next_check=next_action_after(
+                                              rec, now + watch_delay_seconds(rec)),
                                           strikes=st, unk_streak=0, reminders=reminded,
                                           reminders_total=(int(rec.get("reminders_total") or 0)
                                                            + extra_total),
@@ -5989,7 +6489,7 @@ async def connect_and_run(eng, creds):
                         # لفت حساب نمی‌شود؛ شمارنده‌ی جدای خودش را دارد.
                         if check_gate.blocked():
                             eng.db.ex_set(rec["id"], last_check=now,
-                                          next_check=now + 60,
+                                          next_check=next_action_after(rec, now + 60),
                                           note="فلود بررسی — ۶۰ ثانیه صبر")
                             continue
                         # بعد از ۵ بار نامشخصِ واقعی (نه فلود)، فاصله بلند
@@ -5997,12 +6497,14 @@ async def connect_and_run(eng, creds):
                         unk = int(rec.get("unk_streak") or 0) + 1
                         if unk >= 5:
                             eng.db.ex_set(rec["id"], last_check=now,
-                                          next_check=now + 600, unk_streak=unk,
+                                          next_check=next_action_after(rec, now + 600),
+                                          unk_streak=unk,
                                           note="بررسی عضویت مدتی است نامشخص — ۱۰ دقیقه صبر")
                             await warn_membership_check_broken(now)
                         else:
                             eng.db.ex_set(rec["id"], last_check=now,
-                                          next_check=now + watch_delay_seconds(rec),
+                                          next_check=next_action_after(
+                                              rec, now + watch_delay_seconds(rec)),
                                           unk_streak=unk)
                     await asyncio.sleep(2)
 
@@ -6084,18 +6586,34 @@ async def connect_and_run(eng, creds):
                             await asyncio.sleep(1)
                             continue
                         eng.log("info", "ex_join_try", f"#{rec['id']} {rec['link']}")
+                        # جوین در صفِ تک‌عملکردی: اگر عملکرد دیگری (چک عضویت،
+                        # «نیومدی»، لفت) در جریان باشد یا تازه تمام شده باشد،
+                        # اول صبر می‌کند. rec_id خنک‌کننده‌ی همین رکورد را
+                        # ثبت می‌کند → چکِ «آیا واقعاً جوین شده؟» زودتر از
+                        # فاصله‌ی تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) انجام نمی‌شود.
+                        _join_rec_id = rec["id"]
+                        _join_link = rec["link"]
+
+                        async def _queued_join():
+                            return await join_link(_join_link, _join_rec_id)
+
                         try:
                             ok, msg, title = await asyncio.wait_for(
-                                join_link(rec["link"]), timeout=60)
+                                _queued_join(), timeout=180)
                         except asyncio.TimeoutError:
-                            ok, msg, title = False, "TimeoutError: درخواست Join بیشتر از ۶۰ ثانیه طول کشید", ""
+                            ok, msg, title = False, "TimeoutError: درخواست Join بیشتر از حد مجاز طول کشید (صفِ عملکرد + ۶۰ ثانیه)", ""
                         if ok:
                             eng.join_thr.record()
                             joined_now = int(time.time())
+                            # چکِ بعد از جوین هرگز درجا نیست: حداقل به اندازه‌ی
+                            # فاصله‌ی بین عملکرد‌ها (پیش‌فرض ۱۵–۲۰ ثانیه) و
+                            # فاصله‌ی چک عضویت، بعد از جوین زمان‌بندی می‌شود.
                             eng.db.ex_set(rec["id"], status="joined",
                                           joined_at=joined_now,
                                           last_check=joined_now,
-                                          next_check=joined_now + membership_check_delay(),
+                                          next_check=next_action_after(
+                                              {"id": rec["id"]},
+                                              joined_now + membership_check_delay()),
                                           channel_title=title or None,
                                           strikes=0,
                                           note="جوین شدم" if msg == "joined"

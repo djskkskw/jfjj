@@ -130,6 +130,8 @@ harness = (
     "    UserNotParticipantError = stub_unp\n"
     "    FloodWaitError = stub_fwe\n"
     "    check_gate = gate\n"
+    "    rec_id = None\n"
+    "    queue = True\n"
     "    _warn_check_flood = warnflood\n"
     "    secs = m.secs\n"
     "    async def note(text):\n"
@@ -187,8 +189,11 @@ def mk_eng():
     return eng
 
 
+# صف تک‌عملکردی (فیکس «همه‌چیز درجا پشت سر هم») با فاصله‌ی صفر:
+# رفتارِ تست‌های گیتِ فلود باید دقیقاً مثل قبل بماند.
+NOOP_CD = m.ExCooldown(gap_min=0, gap_max=0)
 hns = {"m": m, "stub_gpr": stub_gpr, "stub_unp": stub_unp,
-       "stub_fwe": stub_fwe, "notes": []}
+       "stub_fwe": stub_fwe, "notes": [], "ex_cd": NOOP_CD}
 exec(harness, hns)
 run_pimc = hns["run_pimc"]
 
