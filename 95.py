@@ -119,6 +119,7 @@ DEFAULTS = {
         # هیچ متن ثابتی از طرف کد ارسال نمی‌شود؛ متن‌ها را خودت ثبت می‌کنی.
         "msg_ok": "",
         "msg_no": "",
+        "msg_claim_no": "",
         "msg_wait": "",
         "msg_nolink": "",
         "msg_come": "",
@@ -144,6 +145,8 @@ DEFAULTS = {
         # همان بلندتر مبناست (هرگز کوتاه‌تر از این نمی‌شود).
         "op_gap_min_sec": 15,
         "op_gap_max_sec": 20,
+        # چند چکِ «نامشخص» پشت‌سرهم تا فرض شود طرف نیامده (۰ = هرگز)
+        "unk_fallback_after": 2,
         # بعد از این تعداد پیام «عضو نیست»، اگر طرف هنوز نیامده باشد از
         # کانالش لفت می‌دهیم (یا اگر هنوز جوین نشده‌ایم، تبادل لغو می‌شود).
         "max_reminders": 2,
@@ -1582,6 +1585,7 @@ HELP = """🤖 راهنمای جفج
 متن‌های تبادل — نمایش منوی متن‌ها
 تبادل پیام موفق جوین شدم
 تبادل پیام ناموفق اول عضو شو
+تبادل پیام ادعای جوین گفتی جوین شدی ولی عضو نشدی
 تبادل پیام انتظار دارم بررسی می‌کنم
 تبادل پیام بدون لینک لینک کانالت را بفرست
 تبادل پیام متن دلخواه — متن بعد از هر Join موفق
@@ -2381,6 +2385,7 @@ class Engine:
             "  با سن رکورد پلکانی بلند می‌شود: تا ۳۰دقیقه ×۱، تا ۲ساعت ×۲، تا ۶ساعت ×۴، بعدش ×۸",
             f"فاصله «نیومدی»: {fa(rem_min)}–{fa(rem_max)} ثانیه تصادفی — دوبار می‌گوید بعد لفت",
             f"صف تک‌عملکردی: هیچ دو عملکردی پشت‌سرهم نمی‌روند — {fa(int(x.get('op_gap_min_sec', 15) or 0))}–{fa(int(x.get('op_gap_max_sec', 20) or 0))} ثانیه صبر بعد از هر عملکرد (چک/جوین/لفت/پیام)",
+            f"چکِ بی‌نتیجه: بعد از {fa(int(x.get('unk_fallback_after', 2) or 0))} بار پشت‌سرهم، فرض «نیومده» و «نیومدی» می‌رود (۰ = هرگز)",
             f"لفت: بعد از {fa(strikes)} بار نبودنِ تأییدشده (هرکدام با چک دوم) — نه با یک منفیِ تنها",
             "",
             f"📊 الان {fa(joined_cnt)} کانال جوین‌شده تحت نظر نگهبانی",
@@ -2679,6 +2684,8 @@ class Engine:
             ("متن موفق", "msgok"),
             ("پیام بدون لینک", "msgnolink"),
             ("پیام ناموفق", "msgno"),
+            ("پیام ادعای جوین", "msgclaimno"),
+            ("پیام ادعا", "msgclaimno"),
             ("پیام انتظار", "msgwait"),
             ("پیام موفق", "msgok"),
             ("پیام بیا", "come"),
@@ -2768,6 +2775,7 @@ class Engine:
             "تأیید": "ok", "تایید": "ok", "رد": "no", "خروج": "out",
             "حذف": "del", "اول": "msgfirst", "موفق": "msgok",
             "ناموفق": "msgno", "انتظار": "msgwait", "بدون لینک": "msgnolink",
+            "پیام ادعا": "msgclaimno", "پیام ادعای جوین": "msgclaimno",
             "گروه": "groups", "گروه‌ها": "groups", "گروه ها": "groups",
             "افزودن": "add", "اضافه": "add",
             "اخطار": "strikes", "اسکن هر": "scanevery",
@@ -2937,14 +2945,18 @@ class Engine:
                      if lo == hi else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
             return f"⏱ تأخیر پاسخ‌های مستقیم: **{shown}**"
 
-        if sub in ("msgok", "msgno", "msgwait", "msgnolink", "msgfirst"):
+        if sub in ("msgok", "msgno", "msgclaimno", "msgwait", "msgnolink",
+                   "msgfirst"):
             key = {"msgok": "msg_ok", "msgno": "msg_no", "msgwait": "msg_wait",
+                   "msgclaimno": "msg_claim_no",
                    "msgnolink": "msg_nolink", "msgfirst": "msg_first"}[sub]
             pretty = {"msgok": "پیام موفق", "msgno": "پیام ناموفق",
+                      "msgclaimno": "پیام ادعای جوین",
                       "msgwait": "پیام انتظار", "msgnolink": "پیام بدون لینک",
                       "msgfirst": "پیام بیا"}[sub]
             when = {"msgok": "عضو بود و جوین شدم",
                     "msgno": "عضو نبود — جوین نمی‌شوم",
+                    "msgclaimno": "گفته جوین شدم ولی عضو نیست",
                     "msgwait": "در حال بررسی‌ام",
                     "msgnolink": "کانالش را پیدا نکردم",
                     "msgfirst": "خودم پیش‌قدم شدم و جوین شدم"}[sub]
@@ -2955,6 +2967,14 @@ class Engine:
                     return (f"**متن فعلی** ({when}):\n\n{cur}\n\n"
                             f"عوض‌کردن: `{command} متن جدید`\n"
                             f"برداشتن: `{command} خاموش`")
+                if sub == "msgclaimno":
+                    return (f"**{when}** — متنی تعیین نکرده‌ای، پس همان متنِ "
+                            "«پیام ناموفق» می‌رود (و اگر آن هم خالی باشد، "
+                            f"پیش‌فرض «{DEFAULT_MSG_NO}» + کانال خودت).\n\n"
+                            f"`{command} متن دلخواهت`\n\n"
+                            "می‌توانی از این‌ها هم استفاده کنی:\n"
+                            "`{name}` اسم طرف • `{channel}` کانال طرف • "
+                            "`{mychannel}` کانال خودت")
                 if sub == "msgno":
                     # پیام ناموفق همیشه پیش‌فرض دارد؛ خاموشی معنا ندارد.
                     return (f"**{when}** — متنی تعیین نکرده‌ای، پس پیش‌فرض "
@@ -2977,6 +2997,9 @@ class Engine:
                 if sub == "msgfirst":
                     x["msg_come"] = ""
                 self.st.save()
+                if sub == "msgclaimno":
+                    return ("🚫 برداشته شد — از این به بعد برای «گفتی جوین شدم "
+                            "ولی نیستی» همان متنِ «پیام ناموفق» می‌رود.")
                 if sub == "msgno":
                     return (f"🚫 برداشته شد — از این به بعد پیش‌فرض "
                             f"«{DEFAULT_MSG_NO}» می‌رود.")
@@ -3659,6 +3682,8 @@ class Engine:
             "",
             "🔄 نگهبانی عضویت:",
             "بعد از جوین، عضویت طرف تا سقف مشخص (پیش‌فرض ۲۴ ساعت) چک می‌شود؛ فاصله‌ی چک با سن رکورد پلکانی بلند می‌شود و لفت فقط بعد از چند نبودنِ تأییدشده انجام می‌شود.",
+            "هر چک نگهبانی یک درخواست می‌زند (نه دو تا)؛ چکِ دوبل فقط قبلِ لفت انجام می‌شود، چون لفت جبران‌ناپذیر است. اگر همان‌لحظه عضو بودن تأیید شود، لفت لغو می‌شود.",
+            "اگر بررسی عضویت به FloodWait/خطای API بخورد، جریان قفل نمی‌شود: بعد از چند چکِ بی‌نتیجه‌ی پشت‌سرهم، «نیومدی» می‌رود (نتیجه‌ی بی‌نتیجه هرگز اخطارِ لفت حساب نمی‌شود).",
             "",
             "📌 دستورهای اصلی:",
             "روشن: `تبادل روشن`",
@@ -3695,6 +3720,8 @@ class Engine:
              "تبادل پیام موفق اومدم بیا", "msg_ok"),
             ("❌ وقتی طرف عضو کانال نبود چه بگوید؟",
              "تبادل پیام ناموفق اول عضو شو", "msg_no"),
+            ("🗣 وقتی طرف گفته جوین شدم ولی عضو نیست چه بگوید؟",
+             "تبادل پیام ادعای جوین گفتی جوین شدی ولی عضو نشدی", "msg_claim_no"),
             ("⏳ وقتی بررسی هنوز تمام نشده چه بگوید؟",
              "تبادل پیام انتظار دارم بررسی می‌کنم", "msg_wait"),
             ("🔗 وقتی لینک طرف پیدا نشد چه بگوید؟",
@@ -3713,6 +3740,9 @@ class Engine:
                 cur = (f"{DEFAULT_MSG_NO} (پیش‌فرض) + کانال خودت، زیر متن"
                        " — فقط برای کسی که کانالش ثبت شده است؛ "
                        "اگر متن سفارشی ثبت کنی، فقط همان متن می‌رود")
+            if not cur and key == "msg_claim_no":
+                cur = ("تنظیم نشده — همان «پیام ناموفق» می‌رود "
+                       "(برای طرفی که ادعای جوین کرده)")
             lines += ["", title, "دستور آماده برای کپی:", f"`{command}`",
                       f"متن فعلی: {cur or 'تنظیم نشده'}"]
         lines += ["", "فرمان عمومی «تبادل پیام» متن موفقیت هر دو نوع Join را تنظیم می‌کند.",
@@ -3782,9 +3812,13 @@ class Engine:
         «نیومدی» + کانال خودم (standard/vip) فرستاده می‌شود.
         وقتی متن سفارشی msg_no ثبت شده باشد، فقط همان متن می‌رود و
         هیچ لینکی زیرش اضافه نمی‌شود — لینک طرف هرگز اتوماتیک نمی‌آید."""
-        raw = (self.ex_cfg().get(key) or "").strip()
-        is_custom_msg_no = bool(raw) and key == "msg_no"
+        cfg = self.ex_cfg()
+        raw = (cfg.get(key) or "").strip()
+        custom = bool(raw)
         t = raw
+        if not t and key == "msg_claim_no":
+            t = (cfg.get("msg_no") or "").strip() or DEFAULT_MSG_NO
+            custom = bool((cfg.get("msg_no") or "").strip())
         if not t and key == "msg_no":
             t = DEFAULT_MSG_NO
         if not t:
@@ -3801,7 +3835,7 @@ class Engine:
         rendered = rendered.strip()
         # اگر msg_no سفارشی نیست (یعنی پیش‌فرض)، کانال خودم را زیرش بیاور
         # نه کانال طرف. اگر سفارشی است، هیچ لینکی اتوماتیک اضافه نکن.
-        if key == "msg_no" and not is_custom_msg_no:
+        if key in ("msg_no", "msg_claim_no") and not custom:
             if mych and mych not in rendered:
                 rendered = f"{rendered}\n{mych}"
         return rendered
@@ -4162,6 +4196,7 @@ class Engine:
                 ("⏱  زمان پیام «بیا»", "تبادل زمان بیا ۰"),
                 ("✅  موفق", "تبادل پیام موفق جوین شدم"),
                 ("❌  ناموفق", "تبادل پیام ناموفق اول عضو شو"),
+                ("🗣  ادعای جوین", "تبادل پیام ادعای جوین گفتی جوین شدی ولی عضو نشدی"),
                 ("⏳  انتظار", "تبادل پیام انتظار دارم چک می‌کنم"),
                 ("🔗  بدون لینک", "تبادل پیام بدون لینک لینک بده"),
                 ("↩️  بازگشت", "تبادل"),
@@ -5293,7 +5328,8 @@ async def connect_and_run(eng, creds):
                 return None
         return False if saw_false else None
 
-    async def confirm_peer_membership(user_id, fast=False, rec_id=None):
+    async def confirm_peer_membership(user_id, fast=False, rec_id=None,
+                                      confirm=True):
         """عضویت را حداقل دوبار تأیید می‌کند تا منفی کاذب ندهد.
         اگر درخواست اول False باشد، یک بار دیگر بعد از فاصله تصادفی
         تنظیم‌شده بررسی می‌شود؛ هیچ پیام اضافه‌ای در این فاصله ارسال نمی‌شود.
@@ -5307,7 +5343,7 @@ async def connect_and_run(eng, creds):
         از چک هم پیامی نمی‌رود.
         """
         first = await peer_in_my_channel(user_id, rec_id)
-        if first is not False:
+        if first is not False or not confirm:
             return first
         # گاهی انتشار عضویت در API تلگرام چند ثانیه طول می‌کشد.
         # این صبرِ بی‌صدا بیرونِ قفل سراسری است تا بقیه‌ی رکوردها معطل نمانند.
@@ -5490,6 +5526,20 @@ async def connect_and_run(eng, creds):
             return base
         return int(max(base, now + max(0, int(gap - since))))
 
+    def unk_fallback(rec, extra=1):
+        """چکِ «نامشخص» دیگر نباید کلِ جریان را تا ابد بخواباند."""
+        try:
+            need = int(eng.ex_cfg().get("unk_fallback_after", 2) or 0)
+        except Exception:
+            need = 2
+        if need <= 0:
+            return False
+        try:
+            cur = int((rec or {}).get("unk_streak") or 0)
+        except (TypeError, ValueError):
+            cur = 0
+        return (cur + max(0, int(extra or 0))) >= need
+
     def reminder_delay():
         """فاصله‌ی تصادفی بین دو پیام «نیومدی»؛ پیش‌فرض ۲۰ تا ۴۰ ثانیه تصادفی.
         هر بار که بخواهد بگوید بین همون عدد تصادفی که تنظیم کردی (پیش‌فرض ۲۰–۴۰)
@@ -5631,7 +5681,9 @@ async def connect_and_run(eng, creds):
         # لینک طرف فقط برای placeholder {channel} اگر کاربر خودش خواسته باشد
         # استفاده می‌شود؛ اما auto-append لینک طرف هرگز انجام نمی‌شود.
         link = (rec.get("link") or "").strip()
-        body = eng.ex_render("msg_no", rec.get("peer_name") or "", link)
+        _claim_no = (rec.get("direction") or "in") == "in"
+        body = eng.ex_render("msg_claim_no" if _claim_no else "msg_no",
+                             rec.get("peer_name") or "", link)
         chat, mid = rec.get("src_chat"), rec.get("src_msg")
         if not body or not chat or not mid:
             return False
@@ -5805,8 +5857,13 @@ async def connect_and_run(eng, creds):
         # چک نمی‌شود («اگه توی چک کردن قبلی‌ها بود، همین الان دوباره چک نکن»)
         # و خنک‌کننده‌ی ۱۵–۲۰ ثانیه‌ایِ بعد از چک هم ثبت می‌شود.
         rec_pre = eng.db.ex_by_peer(getattr(sender, "id", 0) or 0)
-        member = await confirm_peer_membership(
-            sender.id, rec_id=(rec_pre or {}).get("id"))
+        _need_check = bool(claim or replied_to_me or (
+            rec_pre and rec_pre.get("status") in ("pending", "approved", "joined")))
+        if _need_check:
+            member = await confirm_peer_membership(
+                sender.id, rec_id=(rec_pre or {}).get("id"), confirm=False)
+        else:
+            member = None
 
         async def say(key, channel="", fallbacks=()):
             if not x["reply"]:
@@ -5920,7 +5977,9 @@ async def connect_and_run(eng, creds):
             # اولین «نیومدی» همین حالا می‌رود؛ اگر متن سفارشی ثبت شده باشد
             # فقط همان متن می‌رود، وگرنه پیش‌فرض «نیومدی» + کانال خودم.
             # لینک طرف هرگز اتوماتیک زیر پیام نمی‌آید (باگ @SWAG_815 فیکس شد).
-            sent_now = await say("msg_no", link) if send_now else False
+            _say_key = "msg_claim_no" if claim else "msg_no"
+            sent_now = (await say(_say_key, link, fallbacks=("msg_no",))
+                        if send_now else False)
             if rec and rec.get("id"):
                 # زمان‌بندی یادآوری بعدی از لحظه‌ی ارسالِ واقعی همین پیام
                 # حساب می‌شود (فاصله تصادفی، پیش‌فرض ۲۰ تا ۴۰ ثانیه) تا دو
@@ -5971,6 +6030,7 @@ async def connect_and_run(eng, creds):
                                   peer_id=sender.id, peer_name=sender_name,
                                   src_chat=event.chat_id, src_msg=event.id,
                                   replied=0, strikes=0,
+                                  unk_streak=int(rec0.get("unk_streak") or 0) + 1,
                                   next_reminder=next_action_after(
                                       rec0, int(time.time())
                                       + membership_check_delay()),
@@ -6257,7 +6317,10 @@ async def connect_and_run(eng, creds):
                     # بازه‌ی تنظیم‌شده‌ی «فاصله یادآوری» کاربر جمع نشود.
                     still = await confirm_peer_membership(rec["peer_id"],
                                                           fast=True,
-                                                          rec_id=rec["id"])
+                                                          rec_id=rec["id"],
+                                                          confirm=False)
+                    if still is None and unk_fallback(rec):
+                        still = False
                     now2 = int(time.time())
                     max_rem = max(0, min(3, int(x.get("max_reminders", 2) or 0)))
                     if still is True:
@@ -6318,6 +6381,15 @@ async def connect_and_run(eng, creds):
                             # rec_id داده می‌شود تا لفت در صفِ تک‌عملکردی برود:
                             # درجا بعد از آخرین «نیومدی» لفت نمی‌دهد، اول
                             # فاصله‌ی تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) صبر می‌کند.
+                            _conf = await confirm_peer_membership(
+                                rec["peer_id"], fast=True, rec_id=rec["id"])
+                            if _conf is True:
+                                eng.db.ex_set(rec["id"], reminders=0,
+                                              reminders_total=0,
+                                              next_reminder=0, strikes=0,
+                                              unk_streak=0, replied=0,
+                                              note="لفت لغو شد — تأیید شد عضو است")
+                                continue
                             ok, err = await leave_link(rec["link"], rec["id"])
                             eng.db.ex_set(rec["id"],
                                           status="left" if ok else "failed",
@@ -6409,7 +6481,10 @@ async def connect_and_run(eng, creds):
                                       next_check=now_skip + watch_delay_seconds(rec))
                         continue
                     still = await confirm_peer_membership(rec["peer_id"],
-                                                          rec_id=rec["id"])
+                                                          rec_id=rec["id"],
+                                                          confirm=False)
+                    if still is None and unk_fallback(rec):
+                        still = False
                     now = int(time.time())
                     if still is True:
                         eng.db.ex_set(rec["id"], last_check=now,
@@ -6446,6 +6521,17 @@ async def connect_and_run(eng, creds):
                             continue
                         if st >= x["max_strikes"]:
                             # لفت در صفِ تک‌عملکردی: درجا بعد از چک/پیام نیست.
+                            _conf = await confirm_peer_membership(
+                                rec["peer_id"], rec_id=rec["id"])
+                            if _conf is True:
+                                eng.db.ex_set(
+                                    rec["id"], last_check=int(time.time()),
+                                    next_check=next_action_after(
+                                        rec, int(time.time())
+                                        + watch_delay_seconds(rec)),
+                                    strikes=0, unk_streak=0,
+                                    note="لفت لغو شد — تأیید شد عضو است")
+                                continue
                             ok, err = await leave_link(rec["link"], rec["id"])
                             eng.db.ex_set(rec["id"],
                                           status="left" if ok else "failed",

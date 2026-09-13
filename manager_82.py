@@ -1340,7 +1340,8 @@ def build_stamp():
 
 
 HOSTED_ENV_KEYS = ("RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID", "RAILWAY_PROJECT_ID",
-                   "RENDER", "FLY_APP_NAME", "HEROKU_APP_NAME", "KOYEB_APP_NAME")
+                   "RENDER", "RENDER_SERVICE_NAME", "RENDER_SERVICE_ID",
+                   "FLY_APP_NAME", "HEROKU_APP_NAME", "KOYEB_APP_NAME")
 
 
 def is_hosted():

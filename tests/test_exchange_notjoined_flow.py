@@ -134,7 +134,9 @@ j = src.find("# ── نامشخص ──", i)
 assert i > 0 and j > i, "member-is-False branch markers missing"
 branch = src[i:j]
 assert "msg_ok" not in branch, "not-member branch still sends msg_ok back to back"
-assert 'say("msg_no", link)' in branch, "msg_no no longer carries the peer link"
+assert '_say_key = "msg_claim_no" if claim else "msg_no"' in branch
+assert 'say(_say_key, link, fallbacks=("msg_no",))' in branch
+assert "link" in branch
 assert "reminder_delay()" in branch, "reminder schedule no longer random-gapped"
 # «نیومدی + لینک» فقط برای کسی که کانالش ثبت شده، نه هر ریپلای‌کننده
 assert "deep=False" in branch, "not-member branch digs profile/history channels"
@@ -241,7 +243,8 @@ ded8 = "\n".join(ln[8:] if ln.startswith("        ") else ln
                  for ln in blines)
 branch_src = (
     "async def _blk(eng, x, member, event, sender, sender_name, say,\n"
-    "               find_their_channel, reminder_delay, on_exchange_request):\n"
+    "               find_their_channel, reminder_delay, on_exchange_request,\n"
+    "               claim=False):\n"
     + "\n".join("    " + ln for ln in ded8.splitlines())
     + "\n"
 )
@@ -279,9 +282,9 @@ xx["reply"] = True
 
 # first claim: exactly one «نیومدی» with the link, never «جوین شدم»
 asyncio.run(_blk(eng2, xx, False, Evt(), Sender(), "tester",
-                 fake_say, fake_find, gap30, holder))
+                 fake_say, fake_find, gap30, holder, claim=True))
 print("H1 say_calls", say_calls)
-assert say_calls == [("msg_no", "@theirchan")], say_calls
+assert say_calls == [("msg_claim_no", "@theirchan")], say_calls
 rec7 = eng2.db.ex_by_link("@theirchan")
 now = int(time.time())
 print("H1 reminders", rec7["reminders"], "status", rec7["status"],
@@ -296,22 +299,22 @@ print("OK H1 first claim → one «نیومدی» + link, no «جوین شدم»
 # re-claim while the reminder window is still open: no extra message
 nxt_before = rec7["next_reminder"]
 asyncio.run(_blk(eng2, xx, False, Evt(), Sender(), "tester",
-                 fake_say, fake_find, gap30, holder))
+                 fake_say, fake_find, gap30, holder, claim=True))
 rec7b = eng2.db.ex_get(rec7["id"])
 print("H2 say_calls", say_calls, "next_unchanged",
       rec7b["next_reminder"] == nxt_before)
-assert say_calls == [("msg_no", "@theirchan")], "back-to-back message on re-claim"
+assert say_calls == [("msg_claim_no", "@theirchan")], "back-to-back message on re-claim"
 assert rec7b["next_reminder"] == nxt_before, "schedule was pushed/moved"
 print("OK H2 re-claim inside window stays silent")
 
 # after the record was left, a new claim starts a fresh round
 eng2.db.ex_set(rec7["id"], status="left", next_reminder=0, reminders=2)
 asyncio.run(_blk(eng2, xx, False, Evt(), Sender(), "tester",
-                 fake_say, fake_find, gap30, holder))
+                 fake_say, fake_find, gap30, holder, claim=True))
 rec7c = eng2.db.ex_get(rec7["id"])
 print("H3 say_calls", say_calls, "status", rec7c["status"],
       "reminders", rec7c["reminders"])
-assert len(say_calls) == 2 and say_calls[-1] == ("msg_no", "@theirchan")
+assert len(say_calls) == 2 and say_calls[-1] == ("msg_claim_no", "@theirchan")
 assert rec7c["status"] == "pending" and rec7c["reminders"] == 1
 print("OK H3 new claim after leave → fresh two-message round")
 
@@ -407,6 +410,7 @@ harness_src = (
     "    membership_check_delay = stub.check_delay\n"
     "    note = stub.note\n"
     "    check_gate = stub.gate\n"
+    "    unk_fallback = stub.unk_fallback\n"
     "    warn_membership_check_broken = stub.warn_broken\n"
     "    ex_cd = CD0\n"
     "    next_action_after = lambda rec, base=None: int(base)\n"
@@ -432,7 +436,11 @@ class Stub:
         self.warned = []
     async def warn_broken(self, now):
         self.warned.append(now)
-    async def confirm(self, pid, fast=False, rec_id=None):
+    def unk_fallback(self, rec, extra=1):
+        # رفتار تست‌های قدیمی دست‌نخورده بماند
+        return False
+
+    async def confirm(self, pid, fast=False, rec_id=None, confirm=True):
         # نوبت‌های یادآوری باید با fast=True صدا زده شوند تا فاصله‌ی
         # چک عضویت روی بازه‌ی تنظیم‌شده‌ی کاربر اضافه نشود.
         # rec_id یعنی چک در صفِ تک‌عملکردیِ همان رکورد رفته است.
