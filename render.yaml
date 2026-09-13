@@ -1,0 +1,43 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# JAFJ manager as a Docker *web* service. It must be a web service (not a
+# background worker) because the manager binds $PORT with a tiny health
+# endpoint at "/"; Render uses it for the health check and the bound port keeps
+# a free instance from sleeping.
+#
+# Immutable code lives in the image at /opt/jafj; all persistent data
+# (sessions, manager.db / shop.db, per-client self bots) lives on the Disk
+# mounted at /data, so redeploys always run the freshly built code without
+# shadowing it with whatever was on the disk.
+services:
+  - type: web
+    name: jafj-manager
+    runtime: docker
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    startCommand: sh /opt/jafj/render-start.sh
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: JAFJ_IMAGE_DIR
+        value: /opt/jafj
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Secrets are never committed: set them in the Render dashboard (or a
+      # render.yaml sync group). BOT_TOKEN/API_ID/API_HASH/ADMIN_IDS mirror the
+      # ENV overrides manager_82.py already understands.
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+    disk:
+      name: jafj-data
+      mountPath: /data
+      sizeGB: 1
