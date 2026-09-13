@@ -27,6 +27,17 @@ SELF_NAME="95.py"
 
 log() { echo "SELFBOOT: $*"; }
 
+# آیا این پوشه‌ی داده، یک نسخه‌ی قابل‌اجرا از کد را نگه داشته است؟
+# (دیسک/Volume مانت‌شده روی مسیرِ کد = هر دیپلوی بی‌اثر)
+_code_shadow() {
+    _d="$1"
+    [ -n "$_d" ] || return 1
+    [ -f "$_d/$MANAGER_NAME" ] || return 1
+    [ "$_d" = "$IMAGE_DIR" ] && return 1
+    [ -f "$IMAGE_DIR/$MANAGER_NAME" ] || return 1
+    return 0
+}
+
 pick_python() {
     if [ -n "${PYTHON:-}" ] && command -v "$PYTHON" >/dev/null 2>&1; then
         echo "$PYTHON"
@@ -44,12 +55,23 @@ PY="$(pick_python)"
 
 # ── 1) where does the data live? (Volume wins, image dir is a last resort) ──
 if [ -z "${DATA_DIR:-}" ]; then
-    if [ -d "$APP_DIR" ] && [ -w "$APP_DIR" ]; then
+    if [ -d "$APP_DIR" ] && [ -w "$APP_DIR" ] && ! _code_shadow "$APP_DIR"; then
         DATA_DIR="$APP_DIR"
     else
-        DATA_DIR="/data"
-        mkdir -p "$DATA_DIR" 2>/dev/null || DATA_DIR="$IMAGE_DIR"
+        if [ -d "$APP_DIR" ] && _code_shadow "$APP_DIR"; then
+            log "WARNING: $APP_DIR holds a copy of $MANAGER_NAME — a disk mounted over the code makes every deploy look useless; prefer DATA_DIR=/data"
+        fi
+        DATA_DIR="${JAFJ_DATA_MOUNT:-/data}"
+        if ! mkdir -p "$DATA_DIR" 2>/dev/null || [ ! -w "$DATA_DIR" ]; then
+            if [ -d "$APP_DIR" ] && [ -w "$APP_DIR" ]; then
+                DATA_DIR="$APP_DIR"
+            else
+                DATA_DIR="$IMAGE_DIR"
+            fi
+        fi
     fi
+elif _code_shadow "${DATA_DIR:-}"; then
+    log "WARNING: DATA_DIR=$DATA_DIR holds a copy of $MANAGER_NAME — that copy is NEVER executed. If redeploys look useless, move the disk: DATA_DIR=/data"
 fi
 # manager_82.py resolves DATA_DIR against cwd; make it absolute so a relative
 # value keeps meaning the same place it did when the code ran from /app.

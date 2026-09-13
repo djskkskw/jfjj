@@ -94,6 +94,7 @@ harness_src = (
     "    note = stub.note\n"
     "    warn_membership_check_broken = stub.warn\n"
     "    check_gate = stub.gate\n"
+    "    unk_fallback = stub.unk_fallback\n"
     "    next_action_after = lambda rec, base=None: int(base)\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
@@ -115,7 +116,11 @@ class Stub:
         self.fast = []
         self.gate = gate or m.CheckGate(base_gap=0.0)
 
-    async def confirm(self, pid, fast=False, rec_id=None):
+    def unk_fallback(self, rec, extra=1):
+        # رفتار تست‌های قدیمی دست‌نخورده بماند
+        return False
+
+    async def confirm(self, pid, fast=False, rec_id=None, confirm=True):
         # rec_id یعنی چک در صفِ تک‌عملکردیِ همان رکورد رفته است.
         self.fast.append(bool(fast))
         return self.member_map.get(pid)
@@ -248,6 +253,7 @@ pharness = (
     "    warn_membership_check_broken = stub.warn\n"
     "    note = stub.note\n"
     "    check_gate = stub.gate\n"
+    "    unk_fallback = stub.unk_fallback\n"
     "    next_action_after = lambda rec, base=None: int(base)\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"

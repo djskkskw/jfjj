@@ -386,7 +386,11 @@ class WStub:
         self.notes = []
         self.warns = []
 
-    async def confirm(self, pid, fast=False, rec_id=None):
+    def unk_fallback(self, rec, extra=1):
+        # رفتار تست‌های قدیمی دست‌نخورده بماند
+        return False
+
+    async def confirm(self, pid, fast=False, rec_id=None, confirm=True):
         self.checked.append((pid, rec_id))
         return self.member
 
@@ -430,6 +434,7 @@ pharness = (
     "    warn_membership_check_broken = stub.warn\n"
     "    note = stub.note\n"
     "    check_gate = stub.gate\n"
+    "    unk_fallback = stub.unk_fallback\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
@@ -499,6 +504,7 @@ rharness = (
     "    note = stub.note\n"
     "    warn_membership_check_broken = stub.warn\n"
     "    check_gate = stub.gate\n"
+    "    unk_fallback = stub.unk_fallback\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
