@@ -488,6 +488,8 @@ CREATE TABLE IF NOT EXISTS exchange (
     note TEXT,
     src_chat INTEGER,
     src_msg INTEGER,
+    src_ts INTEGER NOT NULL DEFAULT 0,
+    claimed INTEGER NOT NULL DEFAULT 0,
     replied INTEGER NOT NULL DEFAULT 0,
     direction TEXT NOT NULL DEFAULT 'in',
     reminders INTEGER NOT NULL DEFAULT 0,
@@ -516,6 +518,8 @@ class DB:
             # مهاجرت: ستون‌های جدید روی دیتابیس قدیمی
             have = {r[1] for r in self.conn.execute("PRAGMA table_info(exchange)")}
             for col, decl in (("src_chat", "INTEGER"), ("src_msg", "INTEGER"),
+                              ("src_ts", "INTEGER NOT NULL DEFAULT 0"),
+                              ("claimed", "INTEGER NOT NULL DEFAULT 0"),
                               ("replied", "INTEGER NOT NULL DEFAULT 0"),
                               ("direction", "TEXT NOT NULL DEFAULT 'in'"),
                               ("reminders", "INTEGER NOT NULL DEFAULT 0"),
@@ -686,6 +690,11 @@ class DB:
     def ex_set(self, eid, **kw):
         if not kw:
             return
+        # هر بار که پیامِ مرجع (src_msg) عوض می‌شود، زمانش هم ثبت شود تا
+        # یادآوری‌های بعدی بتوانند تشخیص بدهند پیام تازه است یا کهنه‌ی
+        # چندساعت‌پیش (باگِ «نیومدی می‌پرد به چند ساعت قبل»).
+        if "src_msg" in kw:
+            kw.setdefault("src_ts", int(time.time()))
         cols = ",".join(f"{k}=?" for k in kw)
         self._x(f"UPDATE exchange SET {cols} WHERE id=?",
                 tuple(kw.values()) + (eid,))
@@ -5681,17 +5690,32 @@ async def connect_and_run(eng, creds):
         # لینک طرف فقط برای placeholder {channel} اگر کاربر خودش خواسته باشد
         # استفاده می‌شود؛ اما auto-append لینک طرف هرگز انجام نمی‌شود.
         link = (rec.get("link") or "").strip()
-        _claim_no = (rec.get("direction") or "in") == "in"
+        # متنِ «ادعای جوین» فقط برای کسی که واقعاً ادعای Join کرده و دروغ
+        # گفته است؛ طرفی که اصلاً ادعایی نکرده همان «پیام ناموفق» را می‌گیرد.
+        # (قبلاً از direction به‌عنوان معیار استفاده می‌شد که در تبادلِ
+        # پیش‌قدم «درغگو» را با «نیامده» قاطی می‌کرد.)
+        _claim_no = bool(rec.get("claimed"))
         body = eng.ex_render("msg_claim_no" if _claim_no else "msg_no",
                              rec.get("peer_name") or "", link)
         chat, mid = rec.get("src_chat"), rec.get("src_msg")
-        if not body or not chat or not mid:
+        if not body or not chat:
             return False
+        # ── باگِ «نیومدی می‌پرد به چند ساعت قبل» ──
+        # فقط وقتی پیامِ مرجع (src_msg) تازه باشد رویش ریپلای می‌کنیم.
+        # اگر پیامِ مرجع مال چند ساعت پیش باشد (مثلاً پیامِ اولِ تبادلِ
+        # پیش‌قدم)، به‌جای ریپلایِ کهنه، «نیومدی» را به‌صورت پیامِ تازه
+        # در همان چت می‌فرستیم تا مکالمه چند ساعت عقب نرود.
+        STALE_REPLY_AGE = 15 * 60
+        reply_to = None
+        if mid:
+            src_ts = int(rec.get("src_ts") or 0)
+            if src_ts > 0 and (int(time.time()) - src_ts) <= STALE_REPLY_AGE:
+                reply_to = mid
 
         async def _send_reminder():
             if DRY_RUN:
                 return True
-            await client.send_message(chat, body, reply_to=mid, link_preview=False)
+            await client.send_message(chat, body, reply_to=reply_to, link_preview=False)
             return True
 
         try:
@@ -5956,6 +5980,7 @@ async def connect_and_run(eng, creds):
                     send_now = True
                 eng.db.ex_set(rec["id"],
                               src_chat=event.chat_id, src_msg=event.id,
+                              claimed=1 if claim else 0,
                               note="پیش‌قدم انجام شده؛ طرف هنوز عضو کانال من نیست")
             else:
                 # رکورد بسته‌شده (لفت/شکست) با ادعای تازه از نو شروع می‌شود.
@@ -5969,6 +5994,7 @@ async def connect_and_run(eng, creds):
                               unk_streak=0,
                               direction="in",
                               src_chat=event.chat_id, src_msg=event.id,
+                              claimed=1 if claim else 0,
                               replied=0, reminders=old_count,
                               # در دور تازه، نوبت مانده از دور قبلی بی‌معنی است
                               next_reminder=0 if fresh else int(rec.get("next_reminder") or 0),
@@ -6029,6 +6055,7 @@ async def connect_and_run(eng, creds):
                     eng.db.ex_set(rec0["id"], direction="in",
                                   peer_id=sender.id, peer_name=sender_name,
                                   src_chat=event.chat_id, src_msg=event.id,
+                                  claimed=1 if claim else 0,
                                   replied=0, strikes=0,
                                   unk_streak=int(rec0.get("unk_streak") or 0) + 1,
                                   next_reminder=next_action_after(
@@ -6044,6 +6071,7 @@ async def connect_and_run(eng, creds):
                     eng.db.ex_set(rec0["id"], status="pending", direction="in",
                                   peer_id=sender.id, peer_name=sender_name,
                                   src_chat=event.chat_id, src_msg=event.id,
+                                  claimed=1 if claim else 0,
                                   replied=0, strikes=0,
                                   note="کانال من تنظیم نشده — عضویت تأیید نشد")
                     eng.log("warn", "ex_no_channel",
@@ -6081,6 +6109,7 @@ async def connect_and_run(eng, creds):
 
         eng.db.ex_set(rec["id"], src_chat=event.chat_id, src_msg=event.id,
                       replied=0, peer_id=sender.id, peer_name=sender_name,
+                      claimed=0,
                       reminders_total=0)   # عضو واقعی بود — سابقه «نیومدی» پاک شود
 
         if x["auto_join"]:
@@ -6181,6 +6210,7 @@ async def connect_and_run(eng, creds):
                             eng.db.ex_set(rec["id"], status="approved",
                                           direction="out", src_chat=msg.chat_id,
                                           src_msg=msg.id, replied=0,
+                                          claimed=0,
                                           peer_id=sender.id, peer_name=sender_name,
                                           note=f"پیش‌قدم — پیام شماره {selected_index} از جدیدترین‌ها")
                             found += 1
@@ -6190,6 +6220,7 @@ async def connect_and_run(eng, creds):
                                       peer_id=sender.id, peer_name=sender_name,
                                       direction="out", src_chat=msg.chat_id,
                                       src_msg=msg.id, replied=0,
+                                      claimed=0,
                                       strikes=0, note="پیام جدید — دوباره در صف Join")
                         found += 1
 
@@ -6334,6 +6365,7 @@ async def connect_and_run(eng, creds):
                                       reminders=0, reminders_total=0,
                                       next_reminder=0,
                                       strikes=0, unk_streak=0, replied=0,
+                                      claimed=0,
                                       note="عضو شد — آماده Join")
                     elif still is False:
                         count = int(rec.get("reminders") or 0)

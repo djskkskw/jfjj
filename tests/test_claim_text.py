@@ -116,21 +116,24 @@ sns = {"eng": eng, "time": time, "asyncio": asyncio, "ex_cd": CD0,
 exec(ded, sns)
 send_rem = sns["send_not_joined_reminder"]
 
-def mk(peer, direction):
+def mk(peer, claimed):
+    # claimed=1 یعنی طرف ادعای «جوین شدم» کرده ولی عضو نیست (دروغگو)؛
+    # claimed=0 یعنی طرف اصلاً ادعایی نکرده و فقط عضو نشده.
+    # متنِ یادآوری بر اساس همین پرچم انتخاب می‌شود — نه direction.
     r, _n = eng.db.ex_add(peer, "p%d" % peer, "@c%d" % peer)
-    eng.db.ex_set(r["id"], peer_id=peer, direction=direction,
+    eng.db.ex_set(r["id"], peer_id=peer, claimed=claimed,
                   src_chat=11, src_msg=22, reminders_total=0)
     return eng.db.ex_get(r["id"])
 
 SENT.clear()
-asyncio.run(send_rem(mk(8001, "in")))
-check(SENT == ["ادعا کردی!"], "C3: direction=in → متنِ ادعا (بود %r)" % SENT)
+asyncio.run(send_rem(mk(8001, 1)))
+check(SENT == ["ادعا کردی!"], "C3: claimed=1 (ادعای جوین) → متنِ ادعا (بود %r)" % SENT)
 
 SENT.clear()
-asyncio.run(send_rem(mk(8002, "out")))
+asyncio.run(send_rem(mk(8002, 0)))
 check(SENT == ["نیومدی\n@mychan"],
-      "C3: direction=out → همان «نیومدی» (بود %r)" % SENT)
-print("DONE C3 reminder direction")
+      "C3: claimed=0 (بدون ادعا) → همان «نیومدی» (بود %r)" % SENT)
+print("DONE C3 reminder claimed flag")
 
 
 # ═══════ C4 — مهاجرتِ تنظیمِ قدیمی ═══════
