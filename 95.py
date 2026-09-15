@@ -99,7 +99,9 @@ DEFAULTS = {
         "check_min_sec": 15,
         "check_max_sec": 30,
         "check_interval_sec": 30,
-        "response_delay_sec": 15,  # تأخیر پاسخ بعد از Join واقعی
+        # نکته: «response_delay_sec» فقط یک‌بار و پایین‌تر (کنار کلیدهای
+        # response_min_sec/response_max_sec) تعریف می‌شود؛ تعریف دوباره‌اش
+        # در این‌جا کلیدِ تکراریِ دیکشنری بود.
         "max_joins_per_day": 0,    # Join بدون سقف روزانه
         "recheck_hours": 24,       # چک عضویت تا ۲۴ ساعت بعد از جوین ادامه دارد
         "recheck_minutes": 1,       # بررسی پیش‌فرض عضویت هر یک دقیقه (پشتیبان قدیمی)
@@ -973,6 +975,11 @@ class ExCooldown:
         """
         self.apply_config()
         rid = int(rec_id) if rec_id else None
+        # ۰) اگر عملکردی روی همین رکورد در جریان است، اول تا تمام‌شدنش صبر کن
+        #    تا دو مسیر همزمان (چک نگهبانی / یادآوری / جوین) روی یک رکورد کار نکنند.
+        if rid is not None:
+            while rid in self._busy:
+                await asyncio.sleep(0.2)
         # ۱) خنک‌کننده‌ی خودِ رکورد: اگر همین رکورد تازه چک/جوین/پیام گرفته،
         #    ابتدا همان‌قدر صبر می‌شود (پیش از صف رفتن).
         t_before = time.time()
@@ -980,37 +987,46 @@ class ExCooldown:
             w = self.wait_for(rid)
             if w > 0:
                 await asyncio.sleep(w)
+            # از این لحظه این رکورد «در جریان» است. بعد از wait_for ثبت می‌شود
+            # تا این نوبت، خنک‌کننده‌ی خودش را نبیند؛ بقیه‌ی مسیرها اما با
+            # wait_for() می‌فهمند و «الان نه» می‌گیرند.
+            self._busy.add(rid)
         waited_rec = time.time() - t_before
-        # ۲) صفِ سراسری
-        async with self._lock:
-            # مبنای «آخرین عملکرد» را **داخل** قفل می‌خوانیم؛ اگر بیرون
-            # خوانده شود، نوبتی که پشتِ قفل معطل مانده با مبنای کهنه صفر
-            # حساب می‌کند و عملکردِ بعدی درجا پشتِ قبلی می‌رود.
-            ref = self.last_global_done
-            if rid is not None:
-                ref = max(ref, float(self._last_done.get(rid, 0.0) or 0.0))
-            # صبری که بابت خنک‌کننده‌ی رکورد شده از فاصله‌ی صف کم می‌شود؛
-            # وگرنه فاصله دوبار روی هم جمع می‌شد (یک بار رکورد، یک بار صف)
-            # و نوبت‌ها بی‌دلیل دو برابر عقب می‌افتادند.
-            w = ref + self.seconds() - waited_rec - time.time()
-            if w > 0:
-                await asyncio.sleep(w)
-            try:
-                if fn is None:
-                    return None
-                if asyncio.iscoroutinefunction(fn):
-                    return await fn(*a, **kw)
-                return fn(*a, **kw)
-            finally:
-                done = time.time()
-                self.last_global_done = done
+        try:
+            # ۲) صفِ سراسری
+            async with self._lock:
+                # مبنای «آخرین عملکرد» را **داخل** قفل می‌خوانیم؛ اگر بیرون
+                # خوانده شود، نوبتی که پشتِ قفل معطل مانده با مبنای کهنه صفر
+                # حساب می‌کند و عملکردِ بعدی درجا پشتِ قبلی می‌رود.
+                ref = self.last_global_done
                 if rid is not None:
-                    self._last_done[rid] = done
-                    self._order.append(rid)
-                    if len(self._order) > 600:
-                        for k in self._order[:200]:
-                            self._last_done.pop(k, None)
-                        del self._order[:200]
+                    ref = max(ref, float(self._last_done.get(rid, 0.0) or 0.0))
+                # صبری که بابت خنک‌کننده‌ی رکورد شده از فاصله‌ی صف کم می‌شود؛
+                # وگرنه فاصله دوبار روی هم جمع می‌شد (یک بار رکورد، یک بار صف)
+                # و نوبت‌ها بی‌دلیل دو برابر عقب می‌افتادند.
+                w = ref + self.seconds() - waited_rec - time.time()
+                if w > 0:
+                    await asyncio.sleep(w)
+                try:
+                    if fn is None:
+                        return None
+                    if asyncio.iscoroutinefunction(fn):
+                        return await fn(*a, **kw)
+                    return fn(*a, **kw)
+                finally:
+                    done = time.time()
+                    self.last_global_done = done
+                    if rid is not None:
+                        self._last_done[rid] = done
+                        self._order.append(rid)
+                        if len(self._order) > 600:
+                            for k in self._order[:200]:
+                                self._last_done.pop(k, None)
+                            del self._order[:200]
+        finally:
+            # ۴) رکورد از «در جریان» بیرون می‌آید — حتی اگر عملکرد خطا داده باشد.
+            if rid is not None:
+                self._busy.discard(rid)
 
     def note_done(self, rec_id=None, now=None):
         """پایانِ یک عملکرد را ثبت می‌کند بدون اینکه فاصله‌ی صف را تحمیل کند.
@@ -1719,7 +1735,7 @@ class Engine:
             except Exception:
                 pass
             return self.section_text("standard")
-        if c in ("ویژه", "وی‌آی‌پی", "vipmenu", "بخش ویژه") and not (a0 or reply_text):
+        if c in ("ویژه", "وی‌آی‌پی", "وی آی پی", "vipmenu", "بخش ویژه") and not (a0 or reply_text):
             self.st.data["_menu"] = "vip"
             try:
                 self.st.save()
@@ -1830,7 +1846,7 @@ class Engine:
             return self.cmd("حذف کانال", "", reply_text)
         if c == "لیست" and a0.startswith("کانال"):
             return self.submenu_list_channel()
-        if c in ("فعالیت", "استراحت", "سقف", "فاصله", "سکوت", "حالت") \
+        if c in ("فعالیت", "استراحت", "سقف", "فاصله", "سکوت", "حالت", "نوسان") \
                 and (a0.lower() == "ویژه" or
                      a0.lower().startswith(("ویژه ", "ویژه‌"))):
             return self.cmd(c + " ویژه", a0[5:].strip(), reply_text)
@@ -1845,13 +1861,13 @@ class Engine:
         aliases = {
             "عادی": "post",
             "ارسال": "post", "پست": "post", "ارسال فوری": "now",
-            "ویژه": "vip", "وی‌آی‌پی": "vip", "وی ای پی": "vip",
+            "ویژه": "vip", "وی‌آی‌پی": "vip", "وی ای پی": "vip", "وی آی پی": "vip",
             "پنل": "panel", "خانه": "panel",
             "کانال": "setch", "کانال ویژه": "setvip", "کانال‌ویژه": "setvip",
             "تنظیمکانال": "setch",
             "کانالوِیژه": "setvip", "کانالویژه": "setvip",
             "کانال vip": "setvip", "کانالوی آی پی": "setvip",
-            "کانالها": "chans", "کانال‌ها": "chans",
+            "کانالها": "chans", "کانال‌ها": "chans", "کانال ها": "chans",
             "توقف": "pause", "ادامه": "resume", "بازنشانی": "reset",
             "صف": "queue", "حذف": "del", "پاکسازی": "clear",
             "تلاش": "retry", "راهنما": "help", "وضعیت": "panel",
@@ -1866,7 +1882,7 @@ class Engine:
             "کانال‌ویژه": "setvip", "کانالویژه": "setvip",
             "فعالیت‌ویژه": "vactive", "فعالیتویژه": "vactive",
             "استراحت‌ویژه": "vrest", "استراحتویژه": "vrest",
-            "نوسان‌ویژه": "vgap", "نوسانویژه": "vgap",
+            "نوسان‌ویژه": "vgap", "نوسانویژه": "vgap", "نوسان ویژه": "vgap",
             "سقف‌ویژه": "vlimit", "سقفویژه": "vlimit",
         }
         c = aliases.get(c, c)
@@ -2012,13 +2028,15 @@ class Engine:
                     + sm + "\n" + self.LINE_
                     + "\n_برای ارتقا با پشتیبانی تماس بگیر._")
 
-        if c in ("بررسی", "هوش‌بررسی"):
+        if c in ("بررسی", "هوش‌بررسی", "هوش بررسی"):
             rest = (arg or "").strip()
+            # ai_settings_cmd کلمه‌ی اول را زیردستور می‌گیرد؛ پس باید همان
+            # زیردستور را بدهیم، نه عبارت کامل فارسی را (وگرنه None می‌داد).
             if rest in ("فعال", "روشن", "on"):
-                return self.ai_settings_cmd("بررسی فعال")
+                return self.ai_settings_cmd("on")
             if rest in ("خاموش", "off"):
-                return self.ai_settings_cmd("بررسی خاموش")
-            return self.ai_settings_cmd("بررسی")
+                return self.ai_settings_cmd("off")
+            return self.ai_settings_cmd("status")
 
         if c in ("متن موفق", "متن‌موفق", "متنموفق", "پیام موفق"):
             return self.exchange_cmd(("پیام موفق " + (arg or "")).strip())
@@ -4867,8 +4885,10 @@ async def connect_and_run(eng, creds):
     async def note(text):
         try:
             _track_own(await client.send_message("me", text, link_preview=False))
-        except Exception:
-            pass
+        except Exception as e:
+            # قبلاً بی‌صدا رد می‌شد؛ اگر ارسال به Saved Messages فلود بخورد
+            # کل گزارش‌ها ناپدید می‌شدند و هیچ ردی هم نمی‌ماند.
+            eng.log("warn", "note_failed", f"{type(e).__name__}: {str(e)[:120]}")
 
     _warn_check = {"last": 0}
     _warn_check_flood = {"last": 0}
@@ -5028,12 +5048,16 @@ async def connect_and_run(eng, creds):
         bare = {
             "عادی": ("عادی", ""),
             "ویژه": ("ویژه", ""),
+            "وی آی پی": ("ویژه", ""),
+            "وی ای پی": ("ویژه", ""),
             "تبادل": ("ex", ""),
             "گزارش": ("ex", "report"),
             "گزارش خلاصه": ("ex", "report_now"),
             "گزارش خلاصه الان": ("ex", "report_now"),
             "گزارش خلاصه همین الان": ("ex", "report_now"),
             "صف": ("queue", ""),
+            # «پلن» در راهنما مستند است؛ بدون این ورودی فقط با نقطه کار می‌کرد.
+            "پلن": ("پلن", ""),
             "آمار": ("stats", ""),
             "راهنما": ("help", ""),
             "تنظیمات": ("set", ""),
@@ -5146,6 +5170,7 @@ async def connect_and_run(eng, creds):
             ("استراحت ", ("rest",)),
             ("فاصله ویژه ", ("vgap",)),
             ("نوسان‌ویژه ", ("vgap",)),
+            ("نوسان ویژه ", ("vgap",)),
             ("فاصله ", ("gap",)),
             ("سکوت ویژه ", ("vquiet",)),
             ("سکوت ", ("quiet",)),
@@ -5300,9 +5325,12 @@ async def connect_and_run(eng, creds):
                     # با عملکردِ دیگری هم‌پوشانی نکند) ولی فاصله‌ی صف را
                     # دوباره صبر نمی‌کند — آن فاصله را خودش همین الان داده.
                     async with ex_cd.lock:
-                        out = await _one_req()
+                        # اگر درخواست بدون استثنا برگردد یعنی طرف عضو است؛
+                        # خودِ آبجکتِ جواب را برنگردان — فراخوان‌ها با
+                        # `is True` مقایسه می‌کنند و آبجکت هرگز True نیست.
+                        await _one_req()
                         ex_cd.note_done(rec_id)
-                    return out if out is not None else True
+                    return True
                 return True
             except UserNotParticipantError:
                 saw_false = True
@@ -5888,7 +5916,7 @@ async def connect_and_run(eng, creds):
             # ارسال یک تأخیر انسانی ۵–۱۸ ثانیه می‌گیرند تا شکل رباتی نداشته باشد.
             # پیام موفق (msg_ok/msg_come) مسیر خودش را دارد (reply_joined با
             # بازه‌ی ۱۱–۴۸ ثانیه) و از این تأخیر عبور نمی‌کند.
-            if key in ("msg_no", "msg_wait", "msg_nolink"):
+            if key in ("msg_no", "msg_claim_no", "msg_wait", "msg_nolink"):
                 await asyncio.sleep(reply_delay_seconds())
 
             async def _do_reply():
@@ -5902,7 +5930,7 @@ async def connect_and_run(eng, creds):
                 eng.log("info", "ex_reply_attempt", f"{sender_name} [{used}]")
                 # پرچم replied=1 تا همین پیام دوباره ارسال نشود (هر شخص فقط یک بار)
                 # برای پیام‌های مستقیم رویداد ضروری است.
-                if key in ("msg_no", "msg_wait", "msg_nolink"):
+                if key in ("msg_no", "msg_claim_no", "msg_wait", "msg_nolink"):
                     rec_after = eng.db.ex_get(rec["id"]) if rec and rec.get("id") else None
                     if rec_after:
                         eng.db.ex_set(rec_after["id"], replied=1)
@@ -6975,7 +7003,13 @@ async def run_bot():
     print(f"\n{BUILD_TAG}", flush=True)
     if need_telethon():
         print("\n📦 Telethon نصب نیست — نصبش می‌کنم…")
-        os.system(f'"{sys.executable}" -m pip install telethon')
+        # os.system حلقه‌ی رویداد را بلاک می‌کرد؛ زیرپروسه‌ی async جای آن را گرفت.
+        try:
+            _pip = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "pip", "install", "telethon")
+            await _pip.wait()
+        except Exception as e:
+            print(f"   نصب خودکار خطا داد: {type(e).__name__}: {e}")
         if need_telethon():
             print("\n❌ نصب خودکار نشد. دستی بزن:\n\n   pip install telethon\n")
             return 1

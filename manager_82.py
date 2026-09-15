@@ -660,20 +660,23 @@ class Shop:
         return self.p_row(uid)["balance"]
 
     def p_add(self, uid, amount, kind="bonus", detail=""):
-        amount = int(amount)
-        self.p_row(uid)
-        if amount >= 0:
-            self.x("UPDATE points SET balance=balance+?, earned=earned+? WHERE uid=?",
-                   (amount, amount, uid))
-        else:
-            cur = self.x("SELECT balance FROM points WHERE uid=?",
-                         (uid,), "one")["balance"]
-            real = min(cur, -amount)          # فقط همان‌قدر که واقعاً کم شد
-            amount = -real
-            self.x("UPDATE points SET balance=balance-?, spent=spent+? WHERE uid=?",
-                   (real, real, uid))
-        self.x("INSERT INTO points_log (uid,amount,kind,detail,ts) VALUES (?,?,?,?,?)",
-               (uid, amount, kind, detail, now()))
+        # کلِ «بخوان → حساب کن → بنویس» زیر یک قفل است؛ قبلاً SELECT و UPDATE
+        # جدا بودند و دو فراخوانِ همزمان می‌توانستند موجودی را منفی کنند.
+        with self.lock:
+            amount = int(amount)
+            self.p_row(uid)
+            if amount >= 0:
+                self.x("UPDATE points SET balance=balance+?, earned=earned+? WHERE uid=?",
+                       (amount, amount, uid))
+            else:
+                cur = self.x("SELECT balance FROM points WHERE uid=?",
+                             (uid,), "one")["balance"]
+                real = min(cur, -amount)          # فقط همان‌قدر که واقعاً کم شد
+                amount = -real
+                self.x("UPDATE points SET balance=balance-?, spent=spent+? WHERE uid=?",
+                       (real, real, uid))
+            self.x("INSERT INTO points_log (uid,amount,kind,detail,ts) VALUES (?,?,?,?,?)",
+                   (uid, amount, kind, detail, now()))
         return self.p_balance(uid)
 
     def p_spend(self, uid, amount, detail=""):
@@ -698,7 +701,13 @@ class Shop:
 
     def p_charge_due(self, uid, per_hour):
         """بر اساس زمان سپری‌شده امتیاز کم می‌کند.
-        برمی‌گرداند (کسر_شده, موجودی, تمام_شد)"""
+        برمی‌گرداند (کسر_شده, موجودی, تمام_شد)
+
+        نکته: last_charge فقط به‌اندازه‌ی ساعت‌هایی جلو می‌رود که واقعاً
+        پرداخت شده‌اند. قبلاً پیش از کسر به‌اندازه‌ی کامل جلو می‌رفت و
+        p_add کسر را به موجودی محدود می‌کرد؛ نتیجه این بود که مابه‌التفاوت
+        برای همیشه بخشیده می‌شد و عددِ برگشتی هم تئوری بود نه واقعی.
+        """
         r = self.p_row(uid)
         t = now()
         if not r["last_charge"]:
@@ -707,11 +716,16 @@ class Shop:
         hours = (t - r["last_charge"]) // 3600
         if hours <= 0:
             return 0, r["balance"], r["balance"] <= 0
+        per_hour = max(1, int(per_hour or 1))
         cost = hours * per_hour
+        have = max(0, int(r["balance"] or 0))
+        paid = min(cost, have)
+        paid_hours = paid // per_hour
         self.x("UPDATE points SET last_charge=? WHERE uid=?",
-               (r["last_charge"] + hours * 3600, uid))
-        bal = self.p_add(uid, -cost, "runtime", f"{hours} ساعت کارکرد")
-        return cost, bal, bal <= 0
+               (r["last_charge"] + paid_hours * 3600, uid))
+        bal = (self.p_add(uid, -paid, "runtime", f"{hours} ساعت کارکرد")
+               if paid else self.p_balance(uid))
+        return paid, bal, bal <= 0
 
     def p_reset_charge(self, uid):
         self.p_row(uid)
