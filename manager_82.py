@@ -55,15 +55,32 @@ def _start_health_server():
         import http.server, socketserver
         port = int(os.environ.get("PORT", "8080"))
         class Handler(http.server.BaseHTTPRequestHandler):
+            def setup(self):
+                super().setup()
+                self.connection.settimeout(10)
+
+            def do_HEAD(self):
+                self._health(False)
+
             def do_GET(self):
+                self._health(True)
+
+            def _health(self, body):
+                payload = b"JAFJ OK\n"
                 self.send_response(200)
-                self.send_header("Content-type", "text/plain; charset=utf-8")
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(f"JAFJ OK - {len(os.listdir(CLIENTS_DIR)) if os.path.exists(CLIENTS_DIR) else 0} clients".encode())
+                if body:
+                    self.wfile.write(payload)
+
             def log_message(self, *a): pass
-        class ReusableTCPServer(socketserver.TCPServer):
+
+        class ReusableTCPServer(socketserver.ThreadingTCPServer):
             allow_reuse_address = True
-            allow_reuse_port = True
+            daemon_threads = True
+            request_queue_size = 64
         with ReusableTCPServer(("0.0.0.0", port), Handler) as httpd:
             print(f"  🌐 Health server on 0.0.0.0:{port} - برای جلوگیری از Sleep رایگان")
             httpd.serve_forever()

@@ -145,8 +145,8 @@ DEFAULTS = {
         # همان بلندتر مبناست (هرگز کوتاه‌تر از این نمی‌شود).
         "op_gap_min_sec": 15,
         "op_gap_max_sec": 20,
-        # چند چکِ «نامشخص» پشت‌سرهم تا فرض شود طرف نیامده (۰ = هرگز)
-        "unk_fallback_after": 2,
+        # کلید قدیمی برای سازگاری؛ نامشخص هرگز به عدم عضویت تبدیل نمی‌شود
+        "unk_fallback_after": 0,
         # بعد از این تعداد پیام «عضو نیست»، اگر طرف هنوز نیامده باشد از
         # کانالش لفت می‌دهیم (یا اگر هنوز جوین نشده‌ایم، تبادل لغو می‌شود).
         "max_reminders": 2,
@@ -522,6 +522,7 @@ class DB:
                               ("next_reminder", "INTEGER NOT NULL DEFAULT 0"),
                               ("next_check", "INTEGER NOT NULL DEFAULT 0"),
                               ("reminders_total", "INTEGER NOT NULL DEFAULT 0"),
+                              ("claim_joined", "INTEGER NOT NULL DEFAULT 0"),
                               ("unk_streak", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in have:
                     self.conn.execute(f"ALTER TABLE exchange ADD COLUMN {col} {decl}")
@@ -872,6 +873,7 @@ class ExCooldown:
         self._last_done = {}        # رکورد → زمانِ تمام‌شدنِ آخرین عملکرد
         self._order = []            # برای هرسِ حافظه
         self.last_global_done = 0.0
+        self.blocked_until = 0.0
         if now is not None:
             self.last_global_done = float(now)
 
@@ -975,12 +977,10 @@ class ExCooldown:
         rid = int(rec_id) if rec_id else None
         # ۱) خنک‌کننده‌ی خودِ رکورد: اگر همین رکورد تازه چک/جوین/پیام گرفته،
         #    ابتدا همان‌قدر صبر می‌شود (پیش از صف رفتن).
-        t_before = time.time()
         if rid is not None:
             w = self.wait_for(rid)
             if w > 0:
                 await asyncio.sleep(w)
-        waited_rec = time.time() - t_before
         # ۲) صفِ سراسری
         async with self._lock:
             # مبنای «آخرین عملکرد» را **داخل** قفل می‌خوانیم؛ اگر بیرون
@@ -989,10 +989,8 @@ class ExCooldown:
             ref = self.last_global_done
             if rid is not None:
                 ref = max(ref, float(self._last_done.get(rid, 0.0) or 0.0))
-            # صبری که بابت خنک‌کننده‌ی رکورد شده از فاصله‌ی صف کم می‌شود؛
-            # وگرنه فاصله دوبار روی هم جمع می‌شد (یک بار رکورد، یک بار صف)
-            # و نوبت‌ها بی‌دلیل دو برابر عقب می‌افتادند.
-            w = ref + self.seconds() - waited_rec - time.time()
+            # زمان سپری‌شده همین حالا در time.time لحاظ شده؛ دوباره کم نکن.
+            w = max(ref + self.seconds(), self.blocked_until) - time.time()
             if w > 0:
                 await asyncio.sleep(w)
             try:
@@ -1001,6 +999,11 @@ class ExCooldown:
                 if asyncio.iscoroutinefunction(fn):
                     return await fn(*a, **kw)
                 return fn(*a, **kw)
+            except Exception as e:
+                if kind != "check" and type(e).__name__ in ("FloodWaitError", "FloodPremiumWaitError"):
+                    self.blocked_until = max(self.blocked_until,
+                                             time.time() + getattr(e, "seconds", 60) + 2)
+                raise
             finally:
                 done = time.time()
                 self.last_global_done = done
@@ -1055,6 +1058,7 @@ class ExCooldown:
             self._busy.clear()
             self._order.clear()
             self.last_global_done = 0.0
+        self.blocked_until = 0.0
 
     def status_text(self):
         self.apply_config()
@@ -2385,7 +2389,7 @@ class Engine:
             "  با سن رکورد پلکانی بلند می‌شود: تا ۳۰دقیقه ×۱، تا ۲ساعت ×۲، تا ۶ساعت ×۴، بعدش ×۸",
             f"فاصله «نیومدی»: {fa(rem_min)}–{fa(rem_max)} ثانیه تصادفی — دوبار می‌گوید بعد لفت",
             f"صف تک‌عملکردی: هیچ دو عملکردی پشت‌سرهم نمی‌روند — {fa(int(x.get('op_gap_min_sec', 15) or 0))}–{fa(int(x.get('op_gap_max_sec', 20) or 0))} ثانیه صبر بعد از هر عملکرد (چک/جوین/لفت/پیام)",
-            f"چکِ بی‌نتیجه: بعد از {fa(int(x.get('unk_fallback_after', 2) or 0))} بار پشت‌سرهم، فرض «نیومده» و «نیومدی» می‌رود (۰ = هرگز)",
+            "چکِ بی‌نتیجه: فقط بررسی مجدد؛ نه پیام ناموفق و نه لفت",
             f"لفت: بعد از {fa(strikes)} بار نبودنِ تأییدشده (هرکدام با چک دوم) — نه با یک منفیِ تنها",
             "",
             f"📊 الان {fa(joined_cnt)} کانال جوین‌شده تحت نظر نگهبانی",
@@ -3718,8 +3722,8 @@ class Engine:
              "تبادل پیام بیا جوین شدم", "msg_come"),
             ("✅ وقتی تبادل عادی موفق شد چه بگوید؟",
              "تبادل پیام موفق اومدم بیا", "msg_ok"),
-            ("❌ وقتی طرف عضو کانال نبود چه بگوید؟",
-             "تبادل پیام ناموفق اول عضو شو", "msg_no"),
+            ("❌ وقتی من جوین شدم ولی طرف هنوز نیامده چه بگوید؟",
+             "تبادل پیام ناموفق من جوین شدم، تو هنوز عضو نشدی", "msg_no"),
             ("🗣 وقتی طرف گفته جوین شدم ولی عضو نیست چه بگوید؟",
              "تبادل پیام ادعای جوین گفتی جوین شدی ولی عضو نشدی", "msg_claim_no"),
             ("⏳ وقتی بررسی هنوز تمام نشده چه بگوید؟",
@@ -4787,7 +4791,8 @@ async def connect_and_run(eng, creds):
                                                 GetParticipantRequest)
     from telethon.tl.functions.messages import ImportChatInviteRequest
 
-    client = TelegramClient(SESSION, creds["api_id"], creds["api_hash"])
+    client = TelegramClient(SESSION, creds["api_id"], creds["api_hash"],
+                            flood_sleep_threshold=0)
 
     async def phone_cb():
         if creds.get("phone"):
@@ -5276,16 +5281,29 @@ async def connect_and_run(eng, creds):
             return None
         saw_false = False
         for ch in chans:
-            # پاس‌گاه سراسری: فلود بلند → درخواست نزن اصلاً؛ کوتاه → صبر کن
-            w = check_gate.wait()
-            if w > 45:
-                return None
-            if w > 0:
-                await asyncio.sleep(w)
-            check_gate.record()
-
             async def _one_req():
-                return await client(GetParticipantRequest(ch, user_id))
+                # درون قفل: درخواستِ منتظر صف باید FloodWait جدید را هم ببیند.
+                if time.time() < ex_cd.blocked_until:
+                    return None
+                w = check_gate.wait()
+                if w > 45:
+                    return None
+                if w > 0:
+                    await asyncio.sleep(w)
+                check_gate.record()
+                try:
+                    result = await client(GetParticipantRequest(ch, user_id))
+                except FloodWaitError as e:
+                    w = getattr(e, "seconds", 60)
+                    check_gate.penalize(w)
+                    raise
+                participant = getattr(result, "participant", None)
+                if participant is None:
+                    return None
+                if (type(participant).__name__ == "ChannelParticipantLeft"
+                        or getattr(participant, "left", False)):
+                    raise UserNotParticipantError(request=None)
+                return True
 
             try:
                 # یک «عملکرد» در صف سراسری: تا عملکرد قبلی تمام نشده و
@@ -5294,7 +5312,7 @@ async def connect_and_run(eng, creds):
                 # خودِ فاصله‌ی چک (۱۵–۳۰ ثانیه) بین دو درخواست صبر شده، پس
                 # یک‌بار فاصله‌ی صفِ اضافه فقط توان را نصف می‌کرد.
                 if queue:
-                    await ex_cd.action("check", rec_id, _one_req)
+                    out = await ex_cd.action("check", rec_id, _one_req)
                 else:
                     # ادامه‌ی همان عملکردِ چک: فقط قفل سراسری را می‌گیرد (تا
                     # با عملکردِ دیگری هم‌پوشانی نکند) ولی فاصله‌ی صف را
@@ -5302,13 +5320,12 @@ async def connect_and_run(eng, creds):
                     async with ex_cd.lock:
                         out = await _one_req()
                         ex_cd.note_done(rec_id)
-                    return out if out is not None else True
-                return True
+                    return out
+                return out
             except UserNotParticipantError:
                 saw_false = True
             except FloodWaitError as e:
                 w = getattr(e, "seconds", 60)
-                check_gate.penalize(w)
                 # فیکس: فلودِ «بررسی عضویت» ربطی به ظرفیت ارسال ندارد؛
                 # قبلاً تروتیل ارسال هم جریمه می‌شد و کل ربات فریز می‌شد
                 # (نه پیام می‌رفت نه لفت انجام می‌شد). فقط گیت چک می‌ایستد.
@@ -5527,18 +5544,8 @@ async def connect_and_run(eng, creds):
         return int(max(base, now + max(0, int(gap - since))))
 
     def unk_fallback(rec, extra=1):
-        """چکِ «نامشخص» دیگر نباید کلِ جریان را تا ابد بخواباند."""
-        try:
-            need = int(eng.ex_cfg().get("unk_fallback_after", 2) or 0)
-        except Exception:
-            need = 2
-        if need <= 0:
-            return False
-        try:
-            cur = int((rec or {}).get("unk_streak") or 0)
-        except (TypeError, ValueError):
-            cur = 0
-        return (cur + max(0, int(extra or 0))) >= need
+        """خطا/محدودیت API هیچ‌وقت مدرکِ عدم عضویت نیست (حتی تنظیم قدیمی)."""
+        return False
 
     def reminder_delay():
         """فاصله‌ی تصادفی بین دو پیام «نیومدی»؛ پیش‌فرض ۲۰ تا ۴۰ ثانیه تصادفی.
@@ -5681,7 +5688,7 @@ async def connect_and_run(eng, creds):
         # لینک طرف فقط برای placeholder {channel} اگر کاربر خودش خواسته باشد
         # استفاده می‌شود؛ اما auto-append لینک طرف هرگز انجام نمی‌شود.
         link = (rec.get("link") or "").strip()
-        _claim_no = (rec.get("direction") or "in") == "in"
+        _claim_no = bool(rec.get("claim_joined"))
         body = eng.ex_render("msg_claim_no" if _claim_no else "msg_no",
                              rec.get("peer_name") or "", link)
         chat, mid = rec.get("src_chat"), rec.get("src_msg")
@@ -5777,6 +5784,10 @@ async def connect_and_run(eng, creds):
         except Exception:
             pass
 
+        if (not event.is_private and not replied_to_me
+                and not getattr(event, "mentioned", False)):
+            return
+
         sender = await event.get_sender()
         if not sender or getattr(sender, "bot", False):
             return
@@ -5817,21 +5828,9 @@ async def connect_and_run(eng, creds):
         if event.is_private:
             pass
         else:
-            # دروازه‌ی گروه: فقط زمانی پاسخ بده که پیام یا reply به ربات باشد
-            # (replied_to_me) یا ربات را mention کرده باشد (event.mentioned).
-            # این کار جلوی «پنل باز نمی‌شود» و پاسخ‌های تصادفی به
-            # پیام‌های «جوین شدم» مردم به همدیگر را می‌گیرد.
-            # فیکس: خیلی از طرف‌ها به پیام ریپلای نمی‌زنند و «جوین شدم» را
-            # جدا تایپ می‌کنند؛ اگر همین فرستنده یک تبادلِ فعال با ما داشته
-            # باشد و متنش ادعای جوین باشد، پردازشش می‌کنیم — قبلاً همین باعث
-            # می‌شد ادعایش هیچ چک نشود (نه «نیومدی» می‌رفت نه لفت).
+            # سابقهٔ تبادل، حتی joined، مجوز پاسخ به گفتگوی دیگران نیست.
             if not replied_to_me and not getattr(event, "mentioned", False):
-                gate_rec = eng.db.ex_by_peer(getattr(sender, "id", 0) or 0)
-                gate_ok = (local_claim and gate_rec
-                           and gate_rec.get("status") in ("pending", "approved",
-                                                          "joined"))
-                if not gate_ok:
-                    return
+                return
 
         # ریپلای خالی/نامرتبط به پیام جفج را هم پردازش نکن؛ فقط ادعای Join
         # یا لینک واقعی کانال، درخواست تبادل محسوب می‌شود.
@@ -5934,6 +5933,7 @@ async def connect_and_run(eng, creds):
                 # ریپلای تصادفی است؛ نه پیامی می‌رود و نه رکوردی ساخته می‌شود.
                 eng.log("info", "ex_notmember_skip", sender_name)
                 return
+            eng.db.ex_set(rec["id"], claim_joined=int(claim))
             link = link or (rec.get("link") or "")
             max_rem = max(0, min(3, int(x.get("max_reminders", 2) or 0)))
             send_now = False
@@ -6026,7 +6026,7 @@ async def connect_and_run(eng, creds):
                     # چک موقتاً نامشخص شده (FloodWait/خطای API) — یک بررسی
                     # بی‌صدای دوباره زمان‌بندی کن؛ حلقه‌ی یادآوری اگر واقعاً
                     # عضو شد تأیید می‌کند، اگر نه «نیومدی» می‌رود.
-                    eng.db.ex_set(rec0["id"], direction="in",
+                    eng.db.ex_set(rec0["id"], direction="in", claim_joined=int(claim),
                                   peer_id=sender.id, peer_name=sender_name,
                                   src_chat=event.chat_id, src_msg=event.id,
                                   replied=0, strikes=0,
@@ -6041,7 +6041,7 @@ async def connect_and_run(eng, creds):
                     # کانال من اصلاً تنظیم نشده؛ عضویت هرگز قابل تأیید نیست.
                     # در وضعیت pending می‌ماند تا کانال ست شود — نه تأییدِ
                     # کورکورانه، نه جوینِ کانال طرف.
-                    eng.db.ex_set(rec0["id"], status="pending", direction="in",
+                    eng.db.ex_set(rec0["id"], status="pending", direction="in", claim_joined=int(claim),
                                   peer_id=sender.id, peer_name=sender_name,
                                   src_chat=event.chat_id, src_msg=event.id,
                                   replied=0, strikes=0,
@@ -6103,6 +6103,8 @@ async def connect_and_run(eng, creds):
         پیش‌فرض تازه‌ترین لینک جدید است.
         زمان واقعی Join با min_join_gap_sec/max_join_gap_sec کنترل می‌شود."""
         x = eng.ex_cfg()
+        if time.time() < float(x.get("_scan_flood_until", 0)):
+            return 0, "اسکن در انتظار پایان FloodWait"
         if not x["groups"]:
             return 0, "گروهی تعیین نشده"
 
@@ -6189,15 +6191,16 @@ async def connect_and_run(eng, creds):
                         eng.db.ex_set(existing["id"], status="approved",
                                       peer_id=sender.id, peer_name=sender_name,
                                       direction="out", src_chat=msg.chat_id,
-                                      src_msg=msg.id, replied=0,
+                                      src_msg=msg.id, replied=0, claim_joined=0,
+                                      reminders=0, next_reminder=0, next_check=0,
                                       strikes=0, note="پیام جدید — دوباره در صف Join")
                         found += 1
 
             except FloodWaitError as e:
                 w = getattr(e, "seconds", 60)
                 eng.log("warn", "scan_flood", f"{g}: {w}s")
-                await asyncio.sleep(min(w, 60))
-                continue
+                x["_scan_flood_until"] = time.time() + w + 2
+                return found, f"FloodWait {w}s"
             except Exception as e:
                 eng.log("warn", "scan", f"{g}: {type(e).__name__}: {e}")
                 continue
@@ -6390,10 +6393,16 @@ async def connect_and_run(eng, creds):
                                               unk_streak=0, replied=0,
                                               note="لفت لغو شد — تأیید شد عضو است")
                                 continue
+                            if _conf is None:
+                                eng.db.ex_set(rec["id"], next_reminder=next_action_after(
+                                    rec, int(time.time()) + membership_check_delay()),
+                                    note="لفت معلق — عضویت نامشخص است")
+                                continue
                             ok, err = await leave_link(rec["link"], rec["id"])
                             eng.db.ex_set(rec["id"],
-                                          status="left" if ok else "failed",
-                                          next_reminder=0,
+                                          status="left" if ok else "joined",
+                                          next_reminder=0 if ok else next_action_after(
+                                              rec, int(time.time()) + 60),
                                           note="نیومد → لفت دادم" if ok else err)
                             eng.log("info", "ex_left", f"#{rec['id']} {rec['link']}")
                             if ok and rec.get("direction") == "out":
@@ -6532,10 +6541,16 @@ async def connect_and_run(eng, creds):
                                     strikes=0, unk_streak=0,
                                     note="لفت لغو شد — تأیید شد عضو است")
                                 continue
+                            if _conf is None:
+                                eng.db.ex_set(rec["id"], next_check=next_action_after(
+                                    rec, int(time.time()) + membership_check_delay()),
+                                    note="لفت معلق — عضویت نامشخص است")
+                                continue
                             ok, err = await leave_link(rec["link"], rec["id"])
                             eng.db.ex_set(rec["id"],
-                                          status="left" if ok else "failed",
-                                          last_check=now, next_check=0,
+                                          status="left" if ok else "joined",
+                                          last_check=now, next_check=0 if ok else next_action_after(
+                                              rec, int(time.time()) + 60),
                                           strikes=st, unk_streak=0,
                                           note="لفت داد → لفت دادم" if ok else err)
                             eng.log("info", "ex_left", f"#{rec['id']} {rec['link']}")

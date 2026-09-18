@@ -125,13 +125,12 @@ ded = "\n".join(ln[8:] if ln.startswith(" " * 8) else ln for ln in lines)
 
 harness = (
     "import asyncio, time\n"
-    "async def run_pimc(eng, client, gate, warnflood, user_id):\n"
+    "async def run_pimc(eng, client, gate, warnflood, user_id, queue=True):\n"
     "    GetParticipantRequest = stub_gpr\n"
     "    UserNotParticipantError = stub_unp\n"
     "    FloodWaitError = stub_fwe\n"
     "    check_gate = gate\n"
     "    rec_id = None\n"
-    "    queue = True\n"
     "    _warn_check_flood = warnflood\n"
     "    secs = m.secs\n"
     "    async def note(text):\n"
@@ -163,7 +162,7 @@ class FakeClient:
     async def __call__(self, req, **kw):
         self.calls.append(time.time())
         if self.mode == "member":
-            return object()
+            return type("Result", (), {"participant": object()})()
         if self.mode == "notmember":
             raise stub_unp()
         if self.mode == "flood":
@@ -210,6 +209,12 @@ async def scenario_member():
 r, client, gate, wf = asyncio.run(scenario_member())
 check(r is True, "G5: عضو → True")
 check(len(client.calls) == 1, "G5: فقط یک درخواست (کانال اول عضو بود)")
+
+async def scenario_second_check():
+    return await run_pimc(mk_eng(), FakeClient("member"),
+                          m.CheckGate(base_gap=0), {"last": 0}, 4242, queue=False)
+check(asyncio.run(scenario_second_check()) is True,
+      "G5: چک دوم هم دقیقاً True برمی‌گرداند، نه شیء تلگرام")
 
 # فلود → None + سقف گیت + جریمه تروتیل + لاگ
 async def scenario_flood():

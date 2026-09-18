@@ -717,6 +717,38 @@ check(g12["next_reminder"] > int(time.time()),
 print("DONE 12 reported scenario")
 
 
+# A concurrent operation can finish while this record waits for its cooldown.
+# Its fresh global timestamp must not have the record wait subtracted twice.
+async def concurrent_spacing_regression():
+    cd = m.ExCooldown(gap_min=0.06, gap_max=0.06)
+    cd.note_done(111)
+    cd.last_global_done = 0
+    times = []
+    async def other():
+        await asyncio.sleep(0.04)
+        times.append(time.time())
+    async def target():
+        times.append(time.time())
+    await asyncio.gather(cd.action("other", 222, other),
+                         cd.action("target", 111, target))
+    return times[1] - times[0]
+check(asyncio.run(concurrent_spacing_regression()) >= 0.05,
+      "رکورد منتظر، فاصله از پایان آخرین عملکرد را دوباره کم نمی‌کند")
+
+async def flood_deadline_regression():
+    cd = m.ExCooldown(gap_min=0, gap_max=0)
+    class FloodWaitError(Exception):
+        seconds = 30
+    async def fail():
+        raise FloodWaitError()
+    try:
+        await cd.action("reminder", 1, fail)
+    except FloodWaitError:
+        pass
+    return cd.blocked_until - time.time()
+check(asyncio.run(flood_deadline_regression()) >= 30,
+      "فلود ارسال یادآوری سقف سراسری عملکردها را فعال می‌کند")
+
 if FAILS:
     print("FAILED:", len(FAILS))
     for f in FAILS:

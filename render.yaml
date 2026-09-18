@@ -5,10 +5,12 @@
 # دیسکِ مانت‌شده روی مسیرِ کد، کدِ ایمیج را پنهان می‌کند و هر دیپلوی
 # بی‌اثر می‌شود.
 services:
-  - type: worker
+  - type: web
     name: jafj
     runtime: docker
     dockerfilePath: ./Dockerfile
+    dockerCommand: sh /opt/jafj/render-start.sh
+    healthCheckPath: /healthz
     region: frankfurt
     plan: starter
     envVars:

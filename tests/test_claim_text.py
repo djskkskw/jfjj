@@ -116,20 +116,26 @@ sns = {"eng": eng, "time": time, "asyncio": asyncio, "ex_cd": CD0,
 exec(ded, sns)
 send_rem = sns["send_not_joined_reminder"]
 
-def mk(peer, direction):
+def mk(peer, direction, claim=False):
     r, _n = eng.db.ex_add(peer, "p%d" % peer, "@c%d" % peer)
-    eng.db.ex_set(r["id"], peer_id=peer, direction=direction,
+    eng.db.ex_set(r["id"], peer_id=peer, direction=direction, claim_joined=int(claim),
                   src_chat=11, src_msg=22, reminders_total=0)
     return eng.db.ex_get(r["id"])
 
 SENT.clear()
-asyncio.run(send_rem(mk(8001, "in")))
-check(SENT == ["ادعا کردی!"], "C3: direction=in → متنِ ادعا (بود %r)" % SENT)
+asyncio.run(send_rem(mk(8001, "in", True)))
+check(SENT == ["ادعا کردی!"], "C3: ادعای ثبت‌شده → متنِ ادعا (بود %r)" % SENT)
 
 SENT.clear()
 asyncio.run(send_rem(mk(8002, "out")))
 check(SENT == ["نیومدی\n@mychan"],
       "C3: direction=out → همان «نیومدی» (بود %r)" % SENT)
+SENT.clear()
+asyncio.run(send_rem(mk(8003, "in")))
+check(SENT == ["نیومدی\n@mychan"], "C3: ورودی بدون ادعا اتهام نمی‌گیرد")
+SENT.clear()
+asyncio.run(send_rem(mk(8004, "out", True)))
+check(SENT == ["ادعا کردی!"], "C3: پیش‌قدم با ادعای واقعی متن ادعا می‌گیرد")
 print("DONE C3 reminder direction")
 
 
