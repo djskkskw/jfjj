@@ -23,7 +23,7 @@ REPO = HERE.parent
 ROOT = Path(tempfile.gettempdir()) / "jafj_render_host_run"
 
 DRIVER = r"""
-import os, sys, time, urllib.request
+import os, sys, time, urllib.request, socket
 code_dir, manager = os.environ["JAFJ_CODE_DIR"], sys.argv[1]
 sys.argv = [manager]
 sys.path.insert(0, code_dir)
@@ -46,6 +46,20 @@ for _ in range(40):
     except Exception:
         time.sleep(0.25)
 print("HEALTH", repr(body), flush=True)
+# An idle accepted connection must not monopolize the health server.
+slow = socket.create_connection(("127.0.0.1", port), timeout=2)
+slow.sendall(b"GET / HTTP/1.1\r\n")
+time.sleep(0.1)
+try:
+    req = urllib.request.Request("http://127.0.0.1:%d/healthz" % port, method="HEAD")
+    with urllib.request.urlopen(req, timeout=2) as response:
+        assert response.status == 200 and response.read() == b""
+    with urllib.request.urlopen("http://127.0.0.1:%d/healthz" % port, timeout=2) as response:
+        assert response.read() == b"JAFJ OK\n"
+    print("HEALTH_CONCURRENT_OK", flush=True)
+finally:
+    slow.close()
+
 """
 
 FAILS = []
@@ -63,7 +77,7 @@ def check_blueprint():
     if not check(p.exists(), "render.yaml در ریشه‌ی ریپو هست"):
         return
     t = p.read_text(encoding="utf-8")
-    check(re.search(r"type:\s*worker", t), "نوعِ سرویس worker است")
+    check(re.search(r"type:\s*web", t), "نوعِ سرویس web است")
     check(re.search(r"runtime:\s*docker", t), "runtime روی docker")
     check(re.search(r"dockerfilePath:\s*\./Dockerfile", t),
           "dockerfilePath = ./Dockerfile")
@@ -187,6 +201,8 @@ def check_manager():
     check("SELFBOT_ISFILE True" in out, "SELFBOT پیدا شد و موجود است")
     check("HEALTH ''" not in out and "JAFJ OK" in out,
           "هلث‌سرویس روی 0.0.0.0:$PORT جواب می‌دهد")
+    check(p.returncode == 0 and "HEALTH_CONCURRENT_OK" in out,
+          "GET و HEAD با اتصال معطل هم پاسخ می‌دهند")
     check("RENDER_SERVICE_NAME" in (REPO / "manager_82.py").read_text(
         encoding="utf-8"), "کلیدهای Render در HOSTED_ENV_KEYS هستند")
 

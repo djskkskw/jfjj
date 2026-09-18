@@ -348,27 +348,10 @@ print("DONE F5 no blind approve")
 # ════════════════════════════════════════════════════════════
 # F6 — دروازه‌ی گروه: ادعای بدون ریپلای از طرفِ دارای تبادل فعال رد نمی‌شود
 # ════════════════════════════════════════════════════════════
-check("gate_ok" in src and "gate_rec" in src,
-      "F6: گیت گروه حالت استثنای تبادل فعال را دارد")
-check('gate_rec.get("status") in ("pending", "approved",\n'
-      '                                                          "joined")'
-      in src.replace("local_claim and gate_rec\n", ""),
-      "F6: استثنا فقط برای وضعیت‌های فعال (pending/approved/joined)")
-# و منطقش را با دیتابیس واقعی چک کن
-eng = fresh_engine()
-rec, _ = eng.db.ex_add(605, "gate", "@fix605")
-eng.db.ex_set(rec["id"], status="joined")
-gr = eng.db.ex_by_peer(605)
-gate_ok = (True and gr and gr.get("status") in ("pending", "approved", "joined"))
-check(gate_ok is True, "F6: تبادل فعال → ادعای بدون ریپلای پردازش می‌شود")
-gr = eng.db.ex_by_peer(606)   # این طرف هیچ رکوردی ندارد
-gate_ok = bool(gr and gr.get("status") in ("pending", "approved", "joined"))
-check(gate_ok is False, "F6: غریبه بدون تبادل → مثل قبل نادیده (ضد اسپم)")
-eng.db.ex_set(rec["id"], status="left")
-gr = eng.db.ex_by_peer(605)
-gate_ok = bool(gr and gr.get("status") in ("pending", "approved", "joined"))
-check(gate_ok is False, "F6: تبادل بسته‌شده (left) → نادیده")
-print("DONE F6 gate relaxation")
+check("gate_rec" not in src, "F6: رکورد قدیمی مجوز پاسخ در گروه نیست")
+check('not event.is_private and not replied_to_me' in src,
+      "F6: دروازه قبل از تشخیص AI و بررسی عضویت")
+print("DONE F6 strict addressing")
 
 
 # ════════════════════════════════════════════════════════════

@@ -50,7 +50,7 @@ eng.st.prof("standard")["channel"] = "@std_chan"
 x = eng.ex_cfg()
 CD0 = m.ExCooldown(gap_min=0, gap_max=0)
 
-check(x.get("unk_fallback_after") == 2, "U0: پیش‌فرضِ آستانه ۲ است")
+check(x.get("unk_fallback_after") == 0, "U0: تبدیل نامشخص به منفی خاموش است")
 
 
 # ═══════ U1 — آستانه‌ی unk_fallback ═══════
@@ -64,9 +64,9 @@ exec(ded, uns)
 unk_fallback = uns["unk_fallback"]
 
 check(unk_fallback({"unk_streak": 0}) is False, "U1: آستانه۲ — بارِ اول نه")
-check(unk_fallback({"unk_streak": 1}) is True, "U1: آستانه۲ — بارِ دوم بله")
-check(unk_fallback({"unk_streak": 5}) is True, "U1: streak بالا → بله")
-check(unk_fallback({"unk_streak": 0}, extra=2) is True, "U1: extra=2 → بله")
+check(unk_fallback({"unk_streak": 1}) is False, "U1: آستانه۲ — بارِ دوم هم خیر")
+check(unk_fallback({"unk_streak": 5}) is False, "U1: streak بالا هم نامشخص")
+check(unk_fallback({"unk_streak": 0}, extra=2) is False, "U1: extra=2 هم نامشخص")
 check(unk_fallback({}, extra=0) is False, "U1: extra=0 → هرگز")
 check(unk_fallback(None) is False, "U1: رکوردِ None امن است")
 check(unk_fallback({"unk_streak": "خراب"}) is False,
@@ -76,7 +76,7 @@ x["unk_fallback_after"] = 0
 check(unk_fallback({"unk_streak": 99}) is False, "U1: آستانه ۰ → هرگز")
 x["unk_fallback_after"] = 5
 check(unk_fallback({"unk_streak": 3}) is False, "U1: آستانه ۵ — ۴ کافی نیست")
-check(unk_fallback({"unk_streak": 4}) is True, "U1: آستانه ۵ — پنجمی بله")
+check(unk_fallback({"unk_streak": 4}) is False, "U1: آستانه ۵ — پنجمی هم نامشخص")
 x["unk_fallback_after"] = 2
 print("DONE U1 threshold")
 
@@ -235,8 +235,8 @@ check(int(g["strikes"] or 0) == 0, "U4: نتیجه‌ی بی‌نتیجه اخط
 eng.db.ex_set(r1["id"], next_reminder=int(time.time()) - 5)
 asyncio.run(run_reminder(eng, x, stub))
 g2 = eng.db.ex_get(r1["id"])
-check(stub.sent == [r1["id"]],
-      "U4: بارِ دوم → fallback فعال شد و «نیومدی» رفت")
+check(stub.sent == [],
+      "U4: بارِ دوم → نامشخص ماند و پیام نرفت")
 check(stub.confirms and all(c[1] is False for c in stub.confirms),
       "U4: چکِ حلقه‌ی یادآوری تک‌درخواستی است (confirm=False)")
 print("DONE U4 reminder loop fallback")
@@ -253,6 +253,12 @@ check(int(g3["strikes"] or 0) == 0, "U5: strikes صفر شد")
 check("لفت لغو شد" in (g3.get("note") or ""), "U5: note شاملِ «لفت لغو شد»")
 check(len(stub2.confirms) == 2 and stub2.confirms[1][1] is True,
       "U5: چکِ دومِ قبلِ لفت با confirm=True است (دوبل)")
+r_unknown = mkrec(9010, "@u9010", status="joined", reminders=2, direction="out")
+unknown_stub = Stub({9010: [False, None]})
+asyncio.run(run_reminder(eng, x, unknown_stub))
+check(unknown_stub.left == [], "U5: تأیید نهایی نامشخص → لفت ممنوع")
+check(eng.db.ex_get(r_unknown["id"])["next_reminder"] > int(time.time()),
+      "U5: تأیید نامشخص دوباره زمان‌بندی شد")
 print("DONE U5 reminder-loop leave cancelled")
 
 
@@ -314,8 +320,8 @@ check(stub3.left == [], "U6: لفتی انجام نشد")
 eng.db.ex_set(r3["id"], next_check=int(time.time()) - 5)
 asyncio.run(run_watch(eng, x, stub3))
 g5 = eng.db.ex_get(r3["id"])
-check(int(g5["strikes"] or 0) >= 1,
-      "U6: بارِ دوم → fallback فعال شد و مسیرِ «عضو نیست» رفت")
+check(int(g5["strikes"] or 0) == 0,
+      "U6: بارِ دوم → هنوز نامشخص؛ اخطار ندارد")
 check(stub3.confirms and stub3.confirms[0][1] is False,
       "U6: چکِ نگهبانی تک‌درخواستی است")
 
@@ -327,6 +333,12 @@ check(stub4.left == [], "U6: لفتِ نگهبانی با تأییدِ دوبل 
 check(g6["status"] == "joined" and int(g6["strikes"] or 0) == 0,
       "U6: رکورد joined ماند و strikes صفر شد")
 check("لفت لغو شد" in (g6.get("note") or ""), "U6: note شاملِ «لفت لغو شد»")
+r_unknown2 = mkjoined(9011, "@u9011", strikes=1)
+unknown_stub2 = WStub({9011: [False, None]})
+asyncio.run(run_watch(eng, x, unknown_stub2))
+check(unknown_stub2.left == [], "U6: تأیید نهایی نامشخص نگهبانی → لفت ممنوع")
+check(eng.db.ex_get(r_unknown2["id"])["next_check"] > int(time.time()),
+      "U6: نگهبانی نامشخص دوباره زمان‌بندی شد")
 print("DONE U6 watch loop")
 
 

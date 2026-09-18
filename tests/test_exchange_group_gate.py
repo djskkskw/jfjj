@@ -10,13 +10,9 @@ The gate requires the incoming group message to be either a *reply
 to a message of this self-account* (``replied_to_me``) or a *mention*
 of this account (``event.mentioned``). PV behaviour is unchanged.
 
-Fix (claim-flow): peers often type «جوین شدم» as a fresh message
-instead of replying to the bot's message. If that sender has an ACTIVE
-exchange record (pending/approved/joined) and the text is a real join
-claim, the gate lets it through — previously such claims were silently
-ignored, so no «نیومدی» went out and no leave ever happened.
-Strangers (no active record) and closed exchanges (left/failed) stay
-blocked exactly like before.
+An old exchange record is not proof that a public message addresses us.
+Unaddressed claims are blocked even with an active exchange; background
+membership checks continue independently.
 
 This test extracts the gate block from the *real* 95.py source and
 re-runs it against fake events in a subprocess. Scenarios:
@@ -26,7 +22,7 @@ re-runs it against fake events in a subprocess. Scenarios:
   s3: group + claim mentioning our username                   → pass
   s4: PV (private) claim                                      → pass
   s5: group + public channel link, no reply/mention           → blocked
-  s6: group + fresh «جوین شدم» + ACTIVE exchange record       → pass
+  s6: group + fresh «جوین شدم» + ACTIVE exchange record       → blocked
   s7: group + fresh «جوین شدم» + no record at all             → blocked
   s8: group + fresh «جوین شدم» + closed record (left)         → blocked
 """
@@ -62,7 +58,7 @@ i = src.find("# کجاها گوش بده")
 if i < 0:
     print("GATE_NOT_FOUND")
     sys.exit(1)
-end_marker = "if not gate_ok:\n                    return"
+end_marker = 'if not replied_to_me and not getattr(event, "mentioned", False):\n                return'
 j = src.find(end_marker, i)
 if j < 0:
     print("GATE_END_NOT_FOUND")
@@ -132,7 +128,7 @@ scenarios = [
     ("s5", dict(is_private=False, mentioned=False, replied_to_me=False),
      dict(claim=False, rec=None), True),
     ("s6", dict(is_private=False, mentioned=False, replied_to_me=False),
-     dict(claim=True, rec=ACTIVE), False),
+     dict(claim=True, rec=ACTIVE), True),
     ("s7", dict(is_private=False, mentioned=False, replied_to_me=False),
      dict(claim=True, rec=None), True),
     ("s8", dict(is_private=False, mentioned=False, replied_to_me=False),
