@@ -1409,16 +1409,34 @@ def is_dead_token_error(exc):
 
 
 def backup_interval():
-    """فاصله پشتیبان خودکار: max(120, BACKUP_EVERY=900)."""
+    """فاصله پشتیبان خودکار (ثانیه): BACKUP_EVERY خودت را تعیین می‌کند، حداقل ۱۲۰.
+
+    روی Render رایگان (متغیر محیطی «RENDER» همیشه ست است) دیسک ماندگاری وجود
+    ندارد و محتوای /data با هر دیپلوی (مثلاً هر push به گیت‌هاب) و هر
+    ری‌استارت/خواب پاک می‌شود. برای همین پیش‌فرض را در Render از ۹۰۰ به ۱۲۰
+    ثانیه می‌آوریم تا پیش از دیپلوی بعدی نهایتاً ۲ دقیقهٔ آخرِ داده از دست
+    برود، نه کل آن. مقدار صریح BACKUP_EVERY همیشه بر پیش‌فرض اولویت دارد."""
+    v = 900
     try:
-        v = int((os.environ.get("BACKUP_EVERY") or "900").strip() or "900")
+        v = int((os.environ.get("BACKUP_EVERY") or "").strip() or "900")
     except Exception:
         v = 900
+    if not (os.environ.get("BACKUP_EVERY") or "").strip() \
+            and (os.environ.get("RENDER") or "").strip():
+        v = 120
     return max(120, v)
 
 
 def backup_target_raw():
-    return (os.environ.get("BACKUP_CHAT") or "").strip()
+    raw = (os.environ.get("BACKUP_CHAT") or "").strip()
+    if raw:
+        return raw
+    # اگر BACKUP_CHAT تنظیم نشده باشد، طبق روال قبلی به «admin» برمی‌گردیم:
+    # یعنی چت خصوصی اولین مدیر (admin_ids). به این ترتیب بکاپِ خودکار حتی بدون
+    # هیچ تنظیمِ دستی هم روشن می‌شود و داده‌ها بعد از هر آپدیت کد/ری‌استارت
+    # قابل بازیابی‌اند. اگر مقصد دیگری می‌خواهی، BACKUP_CHAT را صریح ست کن
+    # (پذیرنده است: admin / آیدی عددی / @username).
+    return "admin"
 
 
 def maybe_migrate_to_data_dir():
@@ -6271,8 +6289,12 @@ class Manager:
 
     # ---------- پشتیبان خودکار ----------
     def _backup_target(self):
-        """مقصد پشتیبان: admin → چت مدیر، عدد → آیدی، وگرنه @username."""
-        raw = (os.environ.get("BACKUP_CHAT") or "").strip()
+        """مقصد پشتیبان: admin → چت مدیر، عدد → آیدی، وگرنه @username.
+
+        بدون BACKUP_CHAT به «admin» برمی‌گردد تا بکاپ خودکار حتی بدون تنظیم
+        دستی هم به چت خصوصی اولین مدیر برود (داده‌ها بعد از هر دیپلوی/ری‌استارت
+        قابل بازیابی بمانند)."""
+        raw = backup_target_raw()
         if not raw:
             return None
         if raw.lower() == "admin":
@@ -6751,8 +6773,11 @@ class Manager:
         print(f"  سقف: {c['max_clients']} مشتری")
 
         # ── بازیابی خودکار از پشتیبان تلگرام (اگر دیتابیس خالی است) ──
+        # مقصد از backup_target_raw() خوانده می‌شود که بدون BACKUP_CHAT هم
+        # به «admin» برمی‌گردد، پس بعد از هر دیپلوی/ری‌استارت که دیتابیس
+        # پاک شده باشد، بازیابی خودکار انجام می‌شود.
         try:
-            if (os.environ.get("BACKUP_CHAT") or "").strip():
+            if backup_target_raw():
                 try:
                     _cnt0 = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
                     _n0 = _cnt0["c"] if _cnt0 else 0
@@ -6779,9 +6804,9 @@ class Manager:
         asyncio.create_task(self.trial_loop())
         # پشتیبان خودکار روی تلگرام
         try:
-            if (os.environ.get("BACKUP_CHAT") or "").strip():
+            if backup_target_raw():
                 asyncio.create_task(self.backup_loop())
-                print(f"  📦 پشتیبان خودکار فعال: هر {backup_interval()}s به {os.environ.get('BACKUP_CHAT')}", flush=True)
+                print(f"  📦 پشتیبان خودکار فعال: هر {backup_interval()}s به {backup_target_raw()}", flush=True)
         except Exception as e:
             print(f"  ⚠️ پشتیبان خودکار: {e}", flush=True)
 
