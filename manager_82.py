@@ -1519,6 +1519,9 @@ DEFAULTS = {
     "min_topup": 10000,      # کمترین شارژ کیف پول
     "max_topup": 5000000,    # بیشترین شارژ کیف پول
     "force_join": [],        # [{id, user, title}] جوین اجباری
+    # ── آموزش فعال‌سازی (دکمه‌ی «📚 آموزش فعال‌سازی») ──
+    "tut_chat": 0,           # چت منبع محتوا — چت خصوصیِ مدیر با ربات
+    "tut_ids": [],           # آیدی پیام‌های محتوا، به ترتیب ارسال
 }
 
 EN = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -2261,6 +2264,21 @@ USER_HELP = """📖 <b>دستورها</b>
 /cancel — لغو مرحله‌ی فعلی
 /help — همین راهنما"""
 
+# متن پیش‌فرضِ «آموزش فعال‌سازی» — تا وقتی مدیر از پنل محتوای خودش را ثبت نکرده
+DEFAULT_TUTORIAL = """📚 <b>آموزش فعال‌سازی سلف</b>
+━━━━━━━━━━━━━━━
+<b>قدم ۱</b> — از منوی اصلی «🚀 راه‌اندازی سلف روی اکانتم» را بزن.
+
+<b>قدم ۲</b> — شماره موبایل ایرانِ اکانتت را تأیید کن و کد ورودی‌ای که تلگرام برایت می‌فرستد را وارد کن.
+
+<b>قدم ۳</b> — سلف بالا می‌آید و از «⚙️ سرویس من» می‌توانی روشنش کنی.
+
+💡 <b>اعتبار</b>
+• «🎁 تست رایگان ۳۰ دقیقه‌ای» — بدون هزینه امتحانش کن.
+• «🎯 خرید امتیاز» یا «💎 اشتراک ماهانه» — برای استفاده‌ی دائمی.
+
+⚠️ کد ورودی فقط برای خودت می‌آید؛ آن را با کسی به اشتراک نگذار."""
+
 ADMIN_HELP = """🛠 <b>پنل مدیر</b>
 
 /users — لیست مشتری‌ها
@@ -2357,7 +2375,8 @@ def main_menu(is_admin=False, shop_on=True, points_on=True,
                      B("🎁 زیرمجموعه", "m:ref", "success")])
         rows.append([B("🧾 سفارش‌ها", "m:orders", "primary"),
                      B("🎧 پشتیبانی", "m:support", "primary")])
-    rows.append([B("📖 راهنما", "m:help")])
+    rows.append([B("📚 آموزش فعال‌سازی", "m:tut", "success"),
+                 B("📖 راهنما", "m:help")])
     if is_admin:
         rows.append([B("🛠 پنل مدیر", "a:home", "danger")])
     return rows
@@ -2422,6 +2441,7 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B("💳 شماره کارت", "a:card", "primary")],
         [B("🎯 آمار امتیاز", "a:pstats", "success"),
          B("🩺 سلامت سیستم", "a:doctor", "success")],
+        [B("🎬 آموزش فعال‌سازی", "a:tut", "success")],
         [B("📝 متن خوش‌آمدگویی", "a:welcome", "primary"),
          B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
         [B("📣 جوین اجباری", "a:fjoin", "danger"),
@@ -3185,6 +3205,92 @@ class Manager:
             await self.say(chat or uid, t, kb)
         return True
 
+    # ═══════════════════════════════════════════════
+    #  آموزش فعال‌سازی — دکمه‌ی «📚 آموزش فعال‌سازی»
+    # ═══════════════════════════════════════════════
+    def tut_src(self):
+        """منبع محتوای آموزش: (chat_id, [msg_id, ...]) یا (0, [])."""
+        try:
+            chat = int(self.cfg.get("tut_chat") or 0)
+        except (TypeError, ValueError):
+            chat = 0
+        try:
+            ids = [int(x) for x in (self.cfg.get("tut_ids") or [])]
+        except (TypeError, ValueError):
+            ids = []
+        return chat, ids
+
+    @staticmethod
+    def _tut_groups(msgs):
+        """پیام‌های آلبوم (grouped_id یکسان و پشت‌سرهم) را یک گروه می‌کند."""
+        groups = []
+        for m in msgs:
+            gid = getattr(m, "grouped_id", None)
+            if groups and gid and getattr(groups[-1][0], "grouped_id", None) == gid:
+                groups[-1].append(m)
+            else:
+                groups.append([m])
+        return groups
+
+    async def send_tutorial(self, uid):
+        """محتوای «📚 آموزش فعال‌سازی» را برای کاربر می‌فرستد.
+
+        پیام‌ها <b>کپی</b> می‌شوند (بدون هدر فوروارد) تا مثل پیام خودِ ربات
+        باشند — مدیا، کپشن، فرمتِ متن و پیش‌نمایش لینک همه حفظ می‌شوند؛
+        یعنی هر نوعی که مدیر از پنل ثبت کرده باشد: متن، لینک، عکس، ویدیو،
+        ویس، فایل، استیکر، آلبوم…
+        اگر کپی ممکن نشد همان پیام فوروارد می‌شود؛ اگر هیچ‌طور نرفت،
+        متن پیش‌فرض آموزش ارسال می‌شود.
+        """
+        chat, ids = self.tut_src()
+        msgs = []
+        if chat and ids:
+            try:
+                got = await self.bot.get_messages(chat, ids=ids)
+                # پیام‌های حذف‌شده (None) و پیام‌های سرویس را بی‌خیال شو
+                msgs = [m for m in (got or [])
+                        if m is not None and (m.media or (m.raw_text or "").strip())]
+            except Exception as e:
+                print("tut fetch:", type(e).__name__, e)
+        if not msgs:
+            return await self.say(uid, DEFAULT_TUTORIAL,
+                                  [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
+                                   back_btn()])
+        ok = 0
+        for grp in self._tut_groups(msgs):
+            try:
+                if len(grp) == 1:
+                    # Telethon خودش پیامِ Message را کپی می‌کند: مدیا با کپشن
+                    # و فرمت، متنِ لینک‌دار با پیش‌نمایش — بدون هدر فوروارد.
+                    await self.bot.send_message(uid, grp[0])
+                else:
+                    # آلبوم: همه‌ی مدیاها با هم، کپشنِ هر کدام سر جایش
+                    caps = [(m.raw_text or "") for m in grp]
+                    await self.bot.send_file(
+                        uid, [m.media for m in grp],
+                        caption=caps if any(caps) else None)
+                ok += 1
+            except Exception as e:
+                # پلن ب: فوروارد (مثلاً FILE_REFERENCE منقضی شده)
+                print("tut copy:", type(e).__name__, e)
+                try:
+                    await self.bot.forward_messages(uid, [m.id for m in grp], chat)
+                    ok += 1
+                except Exception as e2:
+                    print("tut fwd:", type(e2).__name__, e2)
+            await asyncio.sleep(0.25)
+        if ok:
+            await self.say(uid,
+                f"📚 <b>آموزش فعال‌سازی</b>\n{self.LINE}\n"
+                "سوالی داشتی از «🎧 پشتیبانی» بپرس.\n"
+                "برای شروع، دکمه‌ی زیر:",
+                [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
+                 back_btn()])
+        else:
+            await self.say(uid, DEFAULT_TUTORIAL,
+                           [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
+                            back_btn()])
+
     async def admin_users_page(self, ev, page=0):
         rows = self.db.all()
         per = 6
@@ -3246,8 +3352,8 @@ class Manager:
                                              "verify_phone", "verify_referral", "bcast", "disc_new",
                                              "price_plan", "price_pack",
                                              "gp_n", "say_u", "card_set", "welcome_set",
-                                             "ok_days", "acct_n", "fjoin_add"):
-            keep = data in ("wq:0", "kc:x") or (
+                                             "ok_days", "acct_n", "fjoin_add", "tut_set"):
+            keep = data in ("wq:0", "kc:x", "a:tut_done") or (
                 st_now.get("step") in ("verify_phone", "verify_referral") and data.startswith(("ko:", "o:", "wq:", "kc:", "kp:")))
             if st_now.get("step") in ("verify_phone", "verify_referral") and data not in ("m:home",):
                 keep = True
@@ -3294,6 +3400,10 @@ class Manager:
         if data == "m:help":
             await ans()
             return await self.edit(ev, USER_HELP, [back_btn()])
+
+        if data == "m:tut":
+            await ans("در حال ارسال…")
+            return await self.send_tutorial(uid)
 
         if data == "m:status":
             await ans()
@@ -3919,6 +4029,75 @@ class Manager:
                     "متن جدید را بفرست. برای حذف متن بنویس: خاموش\n"
                     "/cancel برای لغو",
                     [back_btn("a:home")])
+            if k == "tut":
+                chat, ids = self.tut_src()
+                n = len(ids)
+                stat = (f"✅ ثبت شده — {_fa_digits(n)} پیام" if chat and n
+                        else "⚪ هنوز محتوا ثبت نشده (متن پیش‌فرض می‌رود)")
+                kb = [[B("📤 ثبت / تغییر محتوا", "a:tut_set", "success")],
+                      [B("👁 پیش‌نمایش", "a:tut_view", "primary")]]
+                if chat and n:
+                    kb.append([B("🗑 پاک کردن محتوا", "a:tut_del", "danger")])
+                kb.append(back_btn("a:home"))
+                return await self.edit(ev,
+                    f"🎬 <b>آموزش فعال‌سازی</b>\n{self.LINE}\n"
+                    f"وضعیت: {stat}\n{self.LINE}\n"
+                    "وقتی کاربر دکمه‌ی «📚 آموزش فعال‌سازی» را بزند، این محتوا "
+                    "<b>کپی‌شده</b> (بدون هدر فوروارد) برایش ارسال می‌شود.\n\n"
+                    "<b>هر چیزی قابل ثبت است:</b> متن، لینک، عکس، ویدیو، ویس، "
+                    "فایل، استیکر، آلبوم — به ترتیبی که می‌خواهی کاربر ببیند.\n\n"
+                    "<i>محتوا در چتِ خودت با ربات نگه داشته می‌شود؛ "
+                    "پیام‌هایش را پاک نکن.</i>", kb)
+            if k == "tut_set":
+                self.fsm[uid] = {"step": "tut_set", "tut_chat": 0, "tut_pending": []}
+                return await self.edit(ev,
+                    f"📤 <b>ثبت محتوای آموزش فعال‌سازی</b>\n{self.LINE}\n"
+                    "محتوا را <b>همین‌جا</b> بفرست — هر چیزی:\n"
+                    "• 📝 متن و لینک\n"
+                    "• 🖼 عکس / 🎬 ویدیو / 🎤 ویس / 📎 فایل / 🎨 استیکر\n"
+                    "• 🖼🖼 آلبوم (چند مدیا با هم)\n\n"
+                    "هر پیام به ترتیب ثبت می‌شود؛ چند پیام پشت‌سرهم هم اشکال ندارد.\n"
+                    "تمام شد؟ دکمه‌ی «✅ تمام شد» را بزن.\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("✅ تمام شد — ذخیره", "a:tut_done", "success")],
+                     [B("⬅️ بازگشت", "a:tut")]])
+            if k == "tut_done":
+                st_tut = self.fsm.get(uid) or {}
+                pend = st_tut.get("tut_pending") or []
+                if not pend:
+                    return await self.edit(ev,
+                        "❌ هنوز پیامی ثبت نشده.\n"
+                        "اول محتوا را بفرست، بعد «✅ تمام شد» را بزن.",
+                        [[B("✅ تمام شد — ذخیره", "a:tut_done", "success")],
+                         [B("⬅️ بازگشت", "a:tut")]])
+                self.fsm.pop(uid, None)
+                self.cfg["tut_chat"] = st_tut.get("tut_chat") or uid
+                self.cfg["tut_ids"] = pend
+                self.cfg.save()
+                self.db.log(uid, "tut_set", f"{len(pend)} پیام")
+                return await self.edit(ev,
+                    f"✅ <b>آموزش فعال‌سازی ذخیره شد</b>\n"
+                    f"📦 {_fa_digits(len(pend))} پیام ثبت شد.\n\n"
+                    "از «👁 پیش‌نمایش» ببین کاربر دقیقاً چه می‌گیرد.",
+                    [[B("👁 پیش‌نمایش", "a:tut_view", "primary")],
+                     [B("🎬 صفحه‌ی آموزش", "a:tut")]])
+            if k == "tut_view":
+                await self.send_tutorial(uid)
+                return await self.edit(ev,
+                    "👁 <b>پیش‌نمایش</b>\n"
+                    "محتوای فعلی برایت ارسال شد — پیام‌های همین چت را ببین.\n"
+                    "<i>همین را کاربر می‌گیرد.</i>",
+                    [[B("⬅️ بازگشت", "a:tut")]])
+            if k == "tut_del":
+                self.cfg["tut_chat"] = 0
+                self.cfg["tut_ids"] = []
+                self.cfg.save()
+                self.db.log(uid, "tut_del", "")
+                return await self.edit(ev,
+                    "🗑 محتوای آموزش پاک شد.\n"
+                    "از این به بعد متن پیش‌فرض برای کاربر می‌رود.",
+                    [[B("📤 ثبت دوباره", "a:tut_set", "success")],
+                     [B("⬅️ بازگشت", "a:tut")]])
             if k == "fjoin":
                 rows = self.force_chans()
                 txt = [f"📣 <b>جوین اجباری</b>", self.LINE,
@@ -6865,6 +7044,38 @@ class Manager:
             st0 = self.fsm.get(uid)
             if st0 and not text.startswith("/"):
                 stp = st0.get("step")
+
+                if stp == "tut_set" and self.is_admin(uid):
+                    # ثبت محتوای آموزش فعال‌سازی — هر نوع پیامی: متن، لینک،
+                    # عکس، ویدیو، ویس، فایل، استیکر، آلبوم (هر آیتم جدا می‌آید)
+                    pend = st0.setdefault("tut_pending", [])
+                    st0.setdefault("tut_chat", ev.chat_id)
+                    pend.append(ev.id)
+                    if ev.photo:
+                        kind = "🖼 عکس"
+                    elif getattr(ev, "video", None):
+                        kind = "🎬 ویدیو"
+                    elif getattr(ev, "gif", None):
+                        kind = "🎞 گیف"
+                    elif getattr(ev, "voice", None):
+                        kind = "🎤 ویس"
+                    elif getattr(ev, "audio", None):
+                        kind = "🎵 آهنگ"
+                    elif getattr(ev, "sticker", None):
+                        kind = "🎨 استیکر"
+                    elif getattr(ev, "document", None):
+                        kind = "📎 فایل"
+                    elif getattr(ev, "contact", None):
+                        kind = "👤 مخاطب"
+                    elif text:
+                        kind = "📝 متن"
+                    else:
+                        kind = "💬 پیام"
+                    return await self.say(ev.chat_id,
+                        f"➕ ثبت شد: {kind}\n"
+                        f"📦 مجموع: {_fa_digits(len(pend))} پیام\n"
+                        "<i>تمام شد؟ دکمه‌ی «✅ تمام شد» در پیامِ بالا را بزن.</i>")
+
                 if stp == "disc":
                     self.fsm.pop(uid, None)
                     return await self.make_invoice(
