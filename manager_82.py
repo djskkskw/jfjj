@@ -3466,6 +3466,10 @@ class Manager:
             "note": str(s.get("note") or "")[:1000],
             "btn_label": str(s.get("btn_label") or "")[:40],
             "btn_cmd": str(s.get("btn_cmd") or "")[:64],
+            # متنِ آماده‌ی بخش (HTML) — بدون نیاز به ثبت پیام از چت مدیر
+            "text": str(s.get("text") or "")[:3500],
+            # اگر از یکی از سه متن آماده ساخته شده، کلیدش (wallet/points/after_run)
+            "preset": str(s.get("preset") or "")[:20],
         }
 
     def tut_when_label(self, when):
@@ -3531,6 +3535,155 @@ class Manager:
         self.tut_save(rows)
         return True
 
+    # ═══════════════════════════════════════════════
+    #  سه متنِ آماده‌ی آموزش — مدیر با یک دکمه از پنل می‌سازد
+    #  (کیف پول / خرید امتیاز / بعد از فعال‌سازی)
+    #  متن‌ها با اعداد تنظیمات (حداقل شارژ، امتیاز هر ساعت…) پر می‌شوند.
+    # ═══════════════════════════════════════════════
+    TUT_PRESETS = (
+        ("wallet", {
+            "name": "آموزش کیف پول", "emoji": "💳",
+            "when": "after_wallet",
+            "btn_cmd": "w:topup", "btn_label": "💳 شارژ کیف پول",
+            "note": "برای شارژ کیف پول دکمه‌ی زیر را بزن 👇",
+        }),
+        ("points", {
+            "name": "آموزش خرید امتیاز", "emoji": "🎯",
+            "when": "after_points",
+            "btn_cmd": "m:packs", "btn_label": "🎯 خرید امتیاز",
+            "note": "برای خرید امتیاز دکمه‌ی زیر را بزن 👇",
+        }),
+        ("after_run", {
+            "name": "بعد از فعال‌سازی", "emoji": "🚀",
+            "when": "after_run",
+            "btn_cmd": "m:svc", "btn_label": "⚙️ سرویس من",
+            "note": "وضعیت سرویس و اعتبارت را از دکمه‌ی زیر ببین 👇",
+        }),
+    )
+
+    def tut_preset_text(self, key):
+        """متنِ آماده‌ی یک پیش‌فرض، با اعدادِ فعلیِ تنظیمات."""
+        cfg = self.cfg
+        L = self.LINE
+        per = max(1, int(cfg.get("cost_per_hour", 1) or 1))
+        mn_pts = int(cfg.get("min_points", 20) or 0)
+        start_fee = int(cfg.get("start_fee", 0) or 0)
+        low = int(cfg.get("low_warn", 10) or 0)
+        pp = int(cfg.get("point_price", 250) or 0)
+        mn_buy = int(cfg.get("min_points_buy", 20) or 0)
+        mx_buy = int(cfg.get("max_points_buy", 5000) or 0)
+        mn_top = int(cfg.get("min_topup", 10000) or 0)
+        mx_top = int(cfg.get("max_topup", 5000000) or 0)
+        if key == "wallet":
+            return (
+                f"💳 <b>آموزش کیف پول</b>\n{L}\n"
+                "کیف پول، موجودیِ تومانیِ تو داخل ربات است؛ یک‌بار شارژ می‌کنی و "
+                "بعداً خرید امتیاز یا اشتراک را بدون کارت‌به‌کارتِ دوباره، "
+                "با همان موجودی انجام می‌دهی.\n\n"
+                "<b>قدم ۱</b> — از منوی اصلی «💳 کیف پول» را بزن.\n"
+                "<b>قدم ۲</b> — «➕ افزایش موجودی» و یکی از مبلغ‌ها را انتخاب کن، "
+                "یا مبلغ دلخواه بفرست.\n"
+                f"      <i>بین {money(mn_top)} تا {money(mx_top)}</i>\n"
+                "<b>قدم ۳</b> — مبلغ را به شماره کارتِ داخل فاکتور واریز کن.\n"
+                "<b>قدم ۴</b> — <b>عکس رسید</b> را همان‌جا بفرست.\n"
+                "<b>قدم ۵</b> — بعد از تأیید مدیر، موجودی خودکار به کیف پولت "
+                "اضافه می‌شود و پیام می‌گیری.\n\n"
+                f"{L}\n"
+                "💡 موقع خرید امتیاز یا اشتراک، دکمه‌ی «خرید با کیف پول» را بزن "
+                "تا از موجودی کم شود — این خریدها نیاز به تأیید مدیر ندارند و "
+                "درجا انجام می‌شوند.\n"
+                "📋 گردش تراکنش‌ها همیشه در «💳 کیف پول» هست.\n\n"
+                "⚠️ رسید را فقط داخل همین ربات بفرست؛ به کسی خارج از ربات نده."
+            )
+        if key == "points":
+            return (
+                f"🎯 <b>آموزش خرید امتیاز</b>\n{L}\n"
+                "امتیاز، سوختِ سلف است: تا وقتی سلف روشن است، هر ساعت "
+                f"<b>{_fa_digits(per)}</b> امتیاز کم می‌شود؛ خاموشش کنی، مصرف هم می‌ایستد.\n\n"
+                "<b>قدم ۱</b> — از منوی اصلی «🎯 خرید امتیاز» را بزن.\n"
+                "<b>قدم ۲</b> — یک بسته انتخاب کن (بسته‌های بزرگ‌تر 🎁 هدیه دارند)، "
+                "یا «✏️ مقدار دلخواه» را بزن.\n"
+                f"      <i>هر امتیاز {money(pp)} — بین {_fa_digits(mn_buy)} تا {_fa_digits(mx_buy)} امتیاز</i>\n"
+                "<b>قدم ۳</b> — پرداخت:\n"
+                "      • «💳 خرید با کیف پول» → درجا و بدون تأیید\n"
+                "      • «✅ خرید» → کارت‌به‌کارت + ارسال <b>عکس رسید</b>\n"
+                "<b>قدم ۴</b> — امتیاز بعد از تأیید به حسابت می‌نشیند و پیام می‌گیری.\n\n"
+                f"{L}\n"
+                f"🔓 برای روشن‌کردن سرویس حداقل <b>{_fa_digits(mn_pts)}</b> امتیاز لازم است.\n"
+                + (f"▶️ هر بار روشن‌کردن <b>{_fa_digits(start_fee)}</b> امتیاز.\n" if start_fee else "")
+                + f"🟠 زیر <b>{_fa_digits(low)}</b> امتیاز هشدار می‌گیری؛ صفر که شد سرویس خاموش می‌شود.\n"
+                "🎟 کد تخفیف داری؟ روی بسته، «🎟 دارم کد تخفیف» را بزن.\n"
+                "📋 موجودی و گردش امتیاز: «🎯 امتیاز من»."
+            )
+        if key == "after_run":
+            return (
+                f"🚀 <b>سلف روی اکانتت فعال شد — حالا چه کنم؟</b>\n{L}\n"
+                "<b>۱</b> — برو داخل تلگرامِ خودت به <b>Saved Messages</b> و بفرست:\n"
+                "<code>.panel</code>\n"
+                "پنل سلف همان‌جا باز می‌شود؛ همه‌ی تنظیمات از همین پنل است.\n\n"
+                "<b>۲</b> — «⚙️ سرویس من» در همین ربات: وضعیتِ روشن/خاموش، "
+                "اعتبار، و دکمه‌ی روشن/خاموش‌کردن سرویس.\n\n"
+                "<b>۳</b> — اعتبار:\n"
+                f"      • امتیاز: هر ساعتِ روشن‌بودن <b>{_fa_digits(per)}</b> امتیاز کم می‌شود "
+                f"(حداقل <b>{_fa_digits(mn_pts)}</b> برای روشن‌کردن)\n"
+                "      • اشتراک ماهانه: بدون مصرف امتیاز تا پایان دوره\n"
+                "      قبل از تمام‌شدن اعتبار پیام یادآوری می‌گیری.\n\n"
+                "<b>۴</b> — مشکلی پیش آمد؟ اول از «⚙️ سرویس من» یک‌بار خاموش/روشن کن؛ "
+                "حل نشد، «🎧 پشتیبانی».\n\n"
+                f"{L}\n"
+                "⚠️ اکانتت را از دستگاه‌های دیگر خارج نکن و رمز دومرحله‌ای را عوض نکن؛ "
+                "وگرنه سلف قطع می‌شود و باید دوباره راه‌اندازی کنی.\n"
+                "⚠️ کد ورودی تلگرام را هیچ‌وقت به کسی نده."
+            )
+        return ""
+
+    def tut_preset_label(self, key):
+        d = dict(self.TUT_PRESETS).get(key)
+        return f"{d['emoji']} {d['name']}" if d else key
+
+    def tut_find_preset(self, key):
+        """بخشی که از این پیش‌فرض ساخته شده (اگر هست)."""
+        for s in self.tut_sections():
+            if s.get("preset") == key:
+                return s
+        return None
+
+    def tut_new_preset(self, key):
+        """از یک متنِ آماده بخش می‌سازد؛ اگر قبلاً ساخته شده همان را برمی‌گرداند.
+
+        خروجی: (section, created)
+        """
+        d = dict(self.TUT_PRESETS).get(key)
+        if not d:
+            return None, False
+        old = self.tut_find_preset(key)
+        if old:
+            return old, False
+        s = self.tut_new(d["name"], d["emoji"])
+        # text خالی می‌ماند → همیشه متنِ آماده‌ی به‌روز (با اعداد فعلی تنظیمات)
+        s = self.tut_update(s["id"], when=d["when"], btn_cmd=d["btn_cmd"],
+                            btn_label=d["btn_label"], note=d["note"],
+                            text="", preset=key)
+        return s, True
+
+    def tut_new_all_presets(self):
+        """هر سه متنِ آماده را یک‌جا می‌سازد (فقط آن‌هایی که هنوز نیستند)."""
+        made = []
+        for key, _ in self.TUT_PRESETS:
+            s, created = self.tut_new_preset(key)
+            if created:
+                made.append(s)
+        return made
+
+    def tut_body_text(self, s):
+        """متنِ بدنه‌ی بخش: متنِ ذخیره‌شده، یا (برای پیش‌فرض‌ها) متن آماده‌ی به‌روز."""
+        t = (s.get("text") or "").strip()
+        if t:
+            return t
+        if s.get("preset"):
+            return self.tut_preset_text(s["preset"])
+        return ""
+
     def tut_btn_rows(self, s):
         """دکمه‌های شیشه‌ای پایانِ یک بخش (از روی btn_label/btn_cmd)."""
         cmd = (s.get("btn_cmd") or "").strip()
@@ -3567,21 +3720,28 @@ class Manager:
                 f"🧩 <b>بخش {_fa_digits(pos)} از {_fa_digits(len(allsec))}"
                 f" — {s['name']}</b>", None)
         msgs = await self._tut_load(s["chat"], s["ids"])
+        body = self.tut_body_text(s)
         ok = 0
         attached = False
+        # ترتیب: پیام‌های ثبت‌شده → متنِ بخش → متن پایان + دکمه.
         # اگر مدیر «متن پایان» نوشته، آن متن با دکمه می‌رود (پیام پایانی جدا)،
-        # وگرنه دکمه روی آخرین پیامِ محتوا می‌نشیند.
+        # وگرنه دکمه روی آخرین پیامِ محتوا (یا روی متنِ بخش) می‌نشیند.
         attach = bool(buttons) and not s["note"]
         if msgs:
             ok, attached = await self._tut_copy(uid, msgs, s["chat"],
-                                                buttons if attach else None)
+                                                buttons if (attach and not body) else None)
+        if body:
+            await self.say(uid, body, buttons if attach else None,
+                           key=f"tut:body:{s['id']}")
+            if attach:
+                attached = True
         if buttons and (s["note"] or not attached):
             # key مخصوصِ همین بخش: متنِ پایانِ تکراریِ دو بخش با هم قاطی نشود
             await self.say(uid, s["note"] or self.TUT_FOOT_FALLBACK, buttons,
                            key=f"tut:{s['id']}")
         elif s["note"]:
             await self.say(uid, s["note"], None, key=f"tut:{s['id']}")
-        if not msgs and not buttons and not s["note"]:
+        if not msgs and not body and not buttons and not s["note"]:
             return False
         self.db.tut_mark(uid, s["id"])
         self.db.log(uid, "tut_sec", f"#{s['id']} {s['name']}")
@@ -3665,11 +3825,21 @@ class Manager:
             txt.append("<i>هنوز بخشی نساخته‌ای. با «➕ بخش جدید» شروع کن.</i>")
         for s in secs:
             n = len(s["ids"])
+            parts = []
+            if n:
+                parts.append(f"{_fa_digits(n)} پیام")
+            if self.tut_body_text(s):
+                parts.append("📝 متن")
             txt.append(f"{'🟢' if s['on'] else '⚪'} {self.tut_sec_label(s)} — "
-                       f"{_fa_digits(n)} پیام — {self.tut_when_label(s['when'])}")
+                       f"{' + '.join(parts) or 'بدون محتوا'} — "
+                       f"{self.tut_when_label(s['when'])}")
             kb.append([B(("🟢" if s["on"] else "⚪") + " " + self.tut_sec_label(s),
                          f"a:sec:{s['id']}",
                          "success" if s["on"] else "primary")])
+        missing = [k for k, _ in self.TUT_PRESETS if not self.tut_find_preset(k)]
+        if missing:
+            kb.append([B("📝 متن‌های آماده (کیف پول / امتیاز / بعد از فعال‌سازی)",
+                         "a:sec_tpl", "success")])
         kb.append([B("⚙️ ارسال خودکار بعد از فعال‌سازی", "a:tut_auto", "primary")])
         kb.append([B("📚 آموزش فعال‌سازی (اصلی)", "a:tut", "success")])
         kb.append(back_btn("a:home"))
@@ -3684,11 +3854,20 @@ class Manager:
         n = len(s["ids"])
         btn = (f"<b>{s['btn_label'] or '—'}</b> → <code>{s['btn_cmd']}</code>"
                if s["btn_cmd"] else "ندارد")
-        warn = [] if n else ["", "⚠️ <i>محتوایی ثبت نشده — با «📤 ثبت محتوا» پیام‌ها را بفرست.</i>"]
+        body = self.tut_body_text(s)
+        warn = [] if (n or body) else [
+            "", "⚠️ <i>محتوایی ثبت نشده — با «📤 ثبت محتوا» پیام بفرست یا با «📝 متن بخش» متن بنویس.</i>"]
+        if body:
+            body_l = ("📝 متن: " + ("متن آماده‌ی " + self.tut_preset_label(s["preset"])
+                                  if s.get("preset") and not s.get("text") else
+                                  f"{_fa_digits(len(body))} حرف") + "  ✅")
+        else:
+            body_l = "📝 متن: —"
         txt = (f"{self.tut_sec_label(s)}   (کد {_fa_digits(s['id'])})\n{self.LINE}\n"
                f"🎛 زمان ارسال: {self.tut_when_label(s['when'])}\n"
                f"⏱ فاصله: {_fa_digits(s['delay'])} ثانیه بعد از بخش قبلی\n"
                f"📦 محتوا: {_fa_digits(n)} پیام{'  ✅' if n else ''}\n"
+               f"{body_l}\n"
                f"🔚 دکمه‌ی پایان: {btn}\n"
                f"📝 متن پایان: {s['note'] or '—'}\n"
                f"🔁 {'یک‌بار برای هر کاربر' if s['once'] else 'هر بار'}"
@@ -3699,6 +3878,9 @@ class Manager:
             [B("📤 ثبت / تغییر محتوا", f"a:sec_set:{sid}", "success")],
             [B("👁 پیش‌نمایش", f"a:sec_vw:{sid}", "primary"),
              B("🗑 پاک‌کردن محتوا", f"a:sec_clr:{sid}", "danger")],
+            [B("📝 متن بخش", f"a:sec_txt:{sid}", "success")]
+            + ([B("♻️ متن آماده", f"a:sec_tpl_rst:{sid}", "primary")]
+               if s.get("preset") else []),
             [B("🎛 زمان ارسال", f"a:sec_when:{sid}", "primary"),
              B("⏱ فاصله (ثانیه)", f"a:sec_dly:{sid}", "primary")],
             [B("🔚 دکمه‌ی پایان بخش", f"a:sec_btn:{sid}", "success"),
@@ -3813,7 +3995,7 @@ class Manager:
                                              "ok_days", "acct_n", "fjoin_add", "tut_set",
                                              "sec_set", "sec_name", "sec_emoji",
                                              "sec_delay", "sec_note", "sec_btn_url",
-                                             "sec_btn_label", "tut_wait"):
+                                             "sec_btn_label", "sec_text", "tut_wait"):
             keep = data in ("wq:0", "kc:x", "a:tut_done") \
                 or data.startswith(("a:sec_done",)) or (
                 st_now.get("step") in ("verify_phone", "verify_referral") and data.startswith(("ko:", "o:", "wq:", "kc:", "kp:")))
@@ -4587,6 +4769,85 @@ class Manager:
             # ── بخش‌بندی آموزش (تگ‌ها) ──
             if k == "secs":
                 return await self.tut_admin_list(ev)
+            # ── سه متنِ آماده: کیف پول / خرید امتیاز / بعد از فعال‌سازی ──
+            if k == "sec_tpl":
+                kb = []
+                for key, d in self.TUT_PRESETS:
+                    have = self.tut_find_preset(key)
+                    kb.append([B(("✅ " if have else "➕ ") + self.tut_preset_label(key),
+                                 f"a:sec:{have['id']}" if have else f"a:sec_tpl_one:{key}",
+                                 "primary" if have else "success")])
+                missing = [k2 for k2, _ in self.TUT_PRESETS if not self.tut_find_preset(k2)]
+                if len(missing) > 1:
+                    kb.append([B(f"⚡️ ساختن هر {_fa_digits(len(missing))} تا با هم",
+                                 "a:sec_tpl_all", "success")])
+                kb.append(back_btn("a:secs"))
+                return await self.edit(ev,
+                    f"📝 <b>متن‌های آماده‌ی آموزش</b>\n{self.LINE}\n"
+                    "سه بخشِ آماده — با یک دکمه ساخته می‌شود؛ متن، زمان ارسال و "
+                    "دکمه‌ی پایان از قبل تنظیم است:\n\n"
+                    "💳 <b>کیف پول</b> — بعد از شارژ کیف پول (خودکار) · دکمه‌ی «💳 شارژ کیف پول»\n"
+                    "🎯 <b>خرید امتیاز</b> — بعد از تأیید خرید امتیاز (خودکار) · دکمه‌ی «🎯 خرید امتیاز»\n"
+                    "🚀 <b>بعد از فعال‌سازی</b> — بعد از فعال‌شدن سلف (خودکار) · دکمه‌ی «⚙️ سرویس من»\n\n"
+                    "اعدادِ متن (حداقل شارژ، امتیاز هر ساعت…) از تنظیماتِ فعلی پر می‌شود.\n"
+                    "<i>بعد از ساختن، هر چیزی را می‌توانی از صفحه‌ی بخش عوض کنی.</i>",
+                    kb)
+            if k.startswith("sec_tpl_one:"):
+                key = k.split(":", 1)[1]
+                s, created = self.tut_new_preset(key)
+                if not s:
+                    return await self.edit(ev, "این متن آماده پیدا نشد.",
+                                           [back_btn("a:sec_tpl")])
+                if created:
+                    self.db.log(uid, "sec_tpl", f"#{s['id']} {key}")
+                return await self.edit(ev,
+                    (f"✅ بخش ساخته شد: <b>{self.tut_sec_label(s)}</b>\n\n"
+                     if created else
+                     f"ℹ️ این بخش قبلاً ساخته شده: <b>{self.tut_sec_label(s)}</b>\n\n")
+                    + f"🎛 {self.tut_when_label(s['when'])}\n"
+                    f"🔚 دکمه‌ی پایان: {s['btn_label']}\n\n"
+                    "با «👁 پیش‌نمایش» ببین کاربر دقیقاً چه می‌گیرد.",
+                    [[B("👁 پیش‌نمایش", f"a:sec_vw:{s['id']}", "primary"),
+                      B("🧩 باز کردن بخش", f"a:sec:{s['id']}", "success")],
+                     back_btn("a:sec_tpl")])
+            if k == "sec_tpl_all":
+                made = self.tut_new_all_presets()
+                for s in made:
+                    self.db.log(uid, "sec_tpl", f"#{s['id']} {s['preset']}")
+                return await self.edit(ev,
+                    (f"✅ {_fa_digits(len(made))} بخش ساخته شد:\n"
+                     + "\n".join(f"• {self.tut_sec_label(s)} — {self.tut_when_label(s['when'])}"
+                                 for s in made)
+                     if made else "ℹ️ هر سه بخش قبلاً ساخته شده بود.")
+                    + "\n\n<i>هر کدام را از «🧩 بخش‌های آموزش» باز کن و اگر خواستی تغییر بده.</i>",
+                    [back_btn("a:secs")])
+            if k.startswith("sec_tpl_rst:"):
+                sid = int(digits(k.split(":", 1)[1]) or 0)
+                s = self.tut_find(sid)
+                if not s or not s.get("preset"):
+                    return await self.edit(ev, "این بخش متن آماده ندارد.",
+                                           [back_btn("a:secs")])
+                self.tut_update(sid, text="")
+                return await self.edit(ev,
+                    f"♻️ متنِ بخش به متن آماده‌ی {self.tut_preset_label(s['preset'])} برگشت.",
+                    [[B("👁 پیش‌نمایش", f"a:sec_vw:{sid}", "primary"),
+                      B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_txt:"):
+                sid = int(digits(k[8:]) or 0)
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.fsm[uid] = {"step": "sec_text", "sec_id": sid}
+                cur = self.tut_body_text(s)
+                return await self.edit(ev,
+                    f"📝 <b>متن بخش — {s['name']}</b>\n{self.LINE}\n"
+                    "متنِ آموزش را همین‌جا بفرست (بولد/لینک تلگرام حفظ می‌شود). "
+                    "این متن بعد از پیام‌های ثبت‌شده و قبل از دکمه‌ی پایان می‌رود.\n\n"
+                    + (f"فعلی: {_fa_digits(len(cur))} حرف\n\n" if cur else "")
+                    + "برای حذف بنویس: <code>خاموش</code>\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
             if k == "sec_add":
                 s = self.tut_new()
                 if not s:
@@ -4599,8 +4860,10 @@ class Manager:
                     "1️⃣ «📤 ثبت / تغییر محتوا» → ویدیو/عکس/متنِ آموزش را بفرست\n"
                     "2️⃣ «🎛 زمان ارسال» → مثلاً بعد از فعال‌سازی سلف (خودکار)\n"
                     "3️⃣ «🔚 دکمه‌ی پایان بخش» → مثلاً «💳 شارژ کیف پول»\n\n"
-                    "<i>اسم بخش را هم با «🏷 نام بخش» عوض کن.</i>",
+                    "<i>اسم بخش را هم با «🏷 نام بخش» عوض کن.</i>\n"
+                    "<i>یا به‌جای این‌ها، از «📝 متن‌های آماده» یکی را بردار.</i>",
                     [[B("🧩 باز کردن بخش", f"a:sec:{s['id']}", "success")],
+                     [B("📝 متن‌های آماده", "a:sec_tpl", "primary")],
                      back_btn("a:secs")])
             if k.startswith("sec:"):
                 return await self.tut_admin_one(ev, int(digits(k[4:]) or 0))
@@ -7875,6 +8138,30 @@ class Manager:
                     return await self.say(ev.chat_id,
                         "✅ متن پایان بخش " + ("حذف شد." if not note else "ذخیره شد."),
                         [[B("🧩 بخش", f"a:sec:{sid}", "success")]])
+                if stp == "sec_text" and self.is_admin(uid):
+                    sid = int(st0.get("sec_id") or 0)
+                    self.fsm.pop(uid, None)
+                    raw = text.strip()
+                    if raw.lower() in ("خاموش", "پاک", "حذف", "-"):
+                        body = ""
+                    else:
+                        # فرمتِ تلگرام (بولد/لینک…) را به HTML نگه می‌داریم
+                        body = raw
+                        try:
+                            ents = getattr(getattr(ev, "message", None), "entities", None)
+                            if ents:
+                                from telethon.extensions import html as _tg_html
+                                body = _tg_html.unparse(raw, ents)
+                        except Exception as e:
+                            print("sec_text html:", type(e).__name__, e)
+                        body = body[:3500]
+                    self.tut_update(sid, text=body)
+                    self.db.log(uid, "sec_text", f"#{sid} {len(body)}")
+                    return await self.say(ev.chat_id,
+                        "✅ متن بخش " + ("حذف شد." if not body else
+                                          f"ذخیره شد ({_fa_digits(len(body))} حرف)."),
+                        [[B("👁 پیش‌نمایش", f"a:sec_vw:{sid}", "primary"),
+                          B("🧩 بخش", f"a:sec:{sid}", "success")]])
                 if stp == "sec_btn_label" and self.is_admin(uid):
                     sid = int(st0.get("sec_id") or 0)
                     self.fsm.pop(uid, None)
