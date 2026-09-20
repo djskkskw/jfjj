@@ -1522,6 +1522,10 @@ DEFAULTS = {
     # ── آموزش فعال‌سازی (دکمه‌ی «📚 آموزش فعال‌سازی») ──
     "tut_chat": 0,           # چت منبع محتوا — چت خصوصیِ مدیر با ربات
     "tut_ids": [],           # آیدی پیام‌های محتوا، به ترتیب ارسال
+    # ── بخش‌بندی آموزش (تگ‌های بخش‌ها؛ مدیر خودش تعیین می‌کند) ──
+    "tut_auto": True,        # بخش‌های «بعد از فعال‌سازی» خودکار بروند
+    "tut_auto_wait": 8,      # چند ثانیه بعد از پیام راه‌اندازی سلف
+    "tut_sections": [],      # [{id,name,emoji,chat,ids,when,delay,on,once,header,note,btn_label,btn_cmd}]
 }
 
 EN = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -1707,6 +1711,10 @@ CREATE TABLE IF NOT EXISTS log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts INTEGER NOT NULL, uid INTEGER, kind TEXT, detail TEXT
 );
+CREATE TABLE IF NOT EXISTS tut_sent (
+    uid INTEGER NOT NULL, sec INTEGER NOT NULL, ts INTEGER NOT NULL,
+    PRIMARY KEY (uid, sec)
+);
 """
 
 
@@ -1809,6 +1817,55 @@ class DB:
 
     def recent(self, n=20):
         return self.x("SELECT * FROM log ORDER BY id DESC LIMIT ?", (n,), "all")
+
+    # ---------- بخش‌های آموزش: کدام بخش برای کدام کاربر رفته ----------
+    def _tut_table(self):
+        """جدولِ tut_sent را مطمئن می‌کند.
+
+        چرا لازم است: بعد از بازیابی از پشتیبانِ قدیمی، فایل دیتابیس همان‌جا
+        کپی می‌شود و جدول‌های تازه ندارند؛ اینجا خودش را ترمیم می‌کند تا
+        «یک‌بار برای هر کاربر» بعد از ری‌استور از کار نیفتد.
+        """
+        if getattr(self, "_tut_ok", False):
+            return
+        with self.lock:
+            try:
+                self.c.execute(
+                    "CREATE TABLE IF NOT EXISTS tut_sent ("
+                    " uid INTEGER NOT NULL, sec INTEGER NOT NULL,"
+                    " ts INTEGER NOT NULL, PRIMARY KEY (uid, sec))")
+                self.c.commit()
+            except Exception as e:
+                print("tut_table:", type(e).__name__, e)
+            self._tut_ok = True
+
+    def tut_mark(self, uid, sec):
+        self._tut_table()
+        try:
+            self.x("INSERT OR REPLACE INTO tut_sent (uid,sec,ts) VALUES (?,?,?)",
+                   (int(uid), int(sec), now()))
+            return True
+        except Exception as e:
+            print("tut_mark:", type(e).__name__, e)
+            return False
+
+    def tut_done(self, uid, sec):
+        self._tut_table()
+        try:
+            r = self.x("SELECT 1 AS x FROM tut_sent WHERE uid=? AND sec=?",
+                       (int(uid), int(sec)), "one")
+            return bool(r)
+        except Exception:
+            return False
+
+    def tut_reset_user(self, uid):
+        """شمارنده‌ی بخش‌های فرستاده‌شده‌ی یک کاربر را پاک می‌کند."""
+        self._tut_table()
+        try:
+            self.x("DELETE FROM tut_sent WHERE uid=?", (int(uid),))
+            return True
+        except Exception:
+            return False
 
 
 # ═══════════════════════════════════════════════════
@@ -2441,7 +2498,8 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B("💳 شماره کارت", "a:card", "primary")],
         [B("🎯 آمار امتیاز", "a:pstats", "success"),
          B("🩺 سلامت سیستم", "a:doctor", "success")],
-        [B("🎬 آموزش فعال‌سازی", "a:tut", "success")],
+        [B("🎬 آموزش فعال‌سازی", "a:tut", "success"),
+         B("🧩 بخش‌های آموزش", "a:secs", "success")],
         [B("📝 متن خوش‌آمدگویی", "a:welcome", "primary"),
          B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
         [B("📣 جوین اجباری", "a:fjoin", "danger"),
@@ -2481,10 +2539,14 @@ class Manager:
             for _ in range(1000):
                 self._live.pop()
 
-    async def say(self, uid, text, buttons=None):
-        """ارسال پیام با ضد تکرار ساده."""
+    async def say(self, uid, text, buttons=None, key=None):
+        """ارسال پیام با ضد تکرار ساده.
+
+        key: برای پیام‌هایی که متنشان تکراری است ولی باید جدا شمرده شوند
+        (مثلاً «متن پایان» دو بخش آموزش که ممکن است یکسان باشد).
+        """
         # ── ضد تکرار: اگه همین متن اخیراً به همین کاربر فرستاده شده، رد کن ──
-        msg_key = f"say:{uid}:{hash(text[:200])}"
+        msg_key = f"say:{uid}:{key if key else hash(text[:200])}"
         now_t = time.time()
         last = getattr(self, "_say_last", None)
         if last is None:
@@ -2819,6 +2881,11 @@ class Manager:
                 kb.append([B("💎 اشتراک ماهانه", "m:plans", "primary")])
             kb.append([B("⬅️ منوی اصلی", "m:home")])
         await self.say(chat, txt, kb)
+
+        # بخش‌های آموزش «بعد از فعال‌سازی» — خودکار، بعد از پیام راه‌اندازی
+        if ok and self.cfg.get("tut_auto", True):
+            self.tut_schedule(uid, "after_run",
+                              wait=int(self.cfg.get("tut_auto_wait", 8) or 0))
 
         for a in self.cfg["admin_ids"]:
             await self.say(a, f"🆕 مشتری جدید\n{name}\nuid: <code>{uid}</code>\n"
@@ -3232,37 +3299,44 @@ class Manager:
                 groups.append([m])
         return groups
 
-    async def send_tutorial(self, uid):
-        """محتوای «📚 آموزش فعال‌سازی» را برای کاربر می‌فرستد.
+    async def _tut_load(self, chat, ids):
+        """پیام‌های ثبت‌شده‌ی یک لیست را از تلگرام می‌خواند.
 
-        پیام‌ها <b>کپی</b> می‌شوند (بدون هدر فوروارد) تا مثل پیام خودِ ربات
-        باشند — مدیا، کپشن، فرمتِ متن و پیش‌نمایش لینک همه حفظ می‌شوند؛
-        یعنی هر نوعی که مدیر از پنل ثبت کرده باشد: متن، لینک، عکس، ویدیو،
-        ویس، فایل، استیکر، آلبوم…
-        اگر کپی ممکن نشد همان پیام فوروارد می‌شود؛ اگر هیچ‌طور نرفت،
-        متن پیش‌فرض آموزش ارسال می‌شود.
+        پیام‌های حذف‌شده (None) و پیام‌های سرویس فیلتر می‌شوند.
         """
-        chat, ids = self.tut_src()
-        msgs = []
-        if chat and ids:
-            try:
-                got = await self.bot.get_messages(chat, ids=ids)
-                # پیام‌های حذف‌شده (None) و پیام‌های سرویس را بی‌خیال شو
-                msgs = [m for m in (got or [])
-                        if m is not None and (m.media or (m.raw_text or "").strip())]
-            except Exception as e:
-                print("tut fetch:", type(e).__name__, e)
-        if not msgs:
-            return await self.say(uid, DEFAULT_TUTORIAL,
-                                  [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
-                                   back_btn()])
+        if not chat or not ids:
+            return []
+        try:
+            got = await self.bot.get_messages(chat, ids=list(ids))
+        except Exception as e:
+            print("tut fetch:", type(e).__name__, e)
+            return []
+        return [m for m in (got or [])
+                if m is not None and (m.media or (m.raw_text or "").strip())]
+
+    async def _tut_copy(self, uid, msgs, chat, buttons=None):
+        """پیام‌ها را کپی می‌کند؛ دکمه‌ها به آخرین پیام می‌چسبند.
+
+        خروجی: (تعداد ارسال‌شده, آیا دکمه‌ها چسبیدند)
+        دکمه فقط وقتی روی خودِ آخرین پیام می‌نشیند که آن پیام <b>تک</b> باشد؛
+        تلگرام روی آلبوم دکمه‌ی شیشه‌ای نمی‌گذارد، پس آن‌جا پایین بخش یک
+        پیام جداگانه با دکمه می‌فرستیم.
+        """
+        groups = self._tut_groups(msgs)
         ok = 0
-        for grp in self._tut_groups(msgs):
+        attached = False
+        for i, grp in enumerate(groups):
+            last = (i == len(groups) - 1)
+            b = buttons if (last and buttons and len(grp) == 1) else None
             try:
                 if len(grp) == 1:
                     # Telethon خودش پیامِ Message را کپی می‌کند: مدیا با کپشن
                     # و فرمت، متنِ لینک‌دار با پیش‌نمایش — بدون هدر فوروارد.
-                    await self.bot.send_message(uid, grp[0])
+                    if b:
+                        await self.bot.send_message(uid, grp[0], buttons=b)
+                        attached = True
+                    else:
+                        await self.bot.send_message(uid, grp[0])
                 else:
                     # آلبوم: همه‌ی مدیاها با هم، کپشنِ هر کدام سر جایش
                     caps = [(m.raw_text or "") for m in grp]
@@ -3279,17 +3353,401 @@ class Manager:
                 except Exception as e2:
                     print("tut fwd:", type(e2).__name__, e2)
             await asyncio.sleep(0.25)
-        if ok:
-            await self.say(uid,
-                f"📚 <b>آموزش فعال‌سازی</b>\n{self.LINE}\n"
-                "سوالی داشتی از «🎧 پشتیبانی» بپرس.\n"
-                "برای شروع، دکمه‌ی زیر:",
-                [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
-                 back_btn()])
-        else:
+        return ok, attached
+
+    async def send_tutorial(self, uid):
+        """محتوای «📚 آموزش فعال‌سازی» را برای کاربر می‌فرستد.
+
+        پیام‌ها <b>کپی</b> می‌شوند (بدون هدر فوروارد) تا مثل پیام خودِ ربات
+        باشند — مدیا، کپشن، فرمتِ متن و پیش‌نمایش لینک همه حفظ می‌شوند؛
+        یعنی هر نوعی که مدیر از پنل ثبت کرده باشد: متن، لینک، عکس، ویدیو،
+        ویس، فایل، استیکر، آلبوم…
+        اگر کپی ممکن نشد همان پیام فوروارد می‌شود؛ اگر هیچ‌طور نرفت،
+        متن پیش‌فرض آموزش ارسال می‌شود.
+
+        بعد از محتوای اصلی، اگر مدیر «بخش» ساخته باشد، تگِ هر بخش هم
+        پایین فرستاده می‌شود تا کاربر هر آموزش را جدا بگیرد.
+        """
+        chat, ids = self.tut_src()
+        msgs = await self._tut_load(chat, ids)
+        if not msgs:
             await self.say(uid, DEFAULT_TUTORIAL,
                            [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
                             back_btn()])
+        else:
+            ok, _ = await self._tut_copy(uid, msgs, chat)
+            if ok:
+                await self.say(uid,
+                    f"📚 <b>آموزش فعال‌سازی</b>\n{self.LINE}\n"
+                    "سوالی داشتی از «🎧 پشتیبانی» بپرس.\n"
+                    "برای شروع، دکمه‌ی زیر:",
+                    [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
+                     back_btn()])
+            else:
+                await self.say(uid, DEFAULT_TUTORIAL,
+                               [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
+                                back_btn()])
+        # تگِ بخش‌ها پایین آموزش
+        return await self.tut_send_menu(uid)
+
+    # ═══════════════════════════════════════════════
+    #  بخش‌بندی آموزش — هر بخش یک «تگ» که کاربر می‌زند
+    #  (مدیر: محتوا + زمان ارسال + دکمه‌ی پایان بخش)
+    # ═══════════════════════════════════════════════
+    TUT_WHENS = (
+        ("after_run",    "🟢 بعد از فعال‌سازی سلف — خودکار"),
+        ("after_wallet", "💳 بعد از شارژ کیف پول — خودکار"),
+        ("after_points", "🎯 بعد از تأیید خرید امتیاز — خودکار"),
+        ("after_sub",    "💎 بعد از تأیید اشتراک ماهانه — خودکار"),
+        ("manual",       "👉 فقط با دکمه (کاربر خودش می‌زند)"),
+    )
+    # دکمه‌ی پایان هر بخش — مقصدهای آماده
+    TUT_TARGETS = (
+        ("w:topup",   "💳 شارژ کیف پول"),
+        ("m:wallet",  "💳 کیف پول من"),
+        ("m:packs",   "🎯 خرید امتیاز"),
+        ("m:plans",   "💎 اشتراک ماهانه"),
+        ("m:pts",     "🎯 امتیاز من"),
+        ("m:svc",     "⚙️ سرویس من"),
+        ("s:setup",   "🚀 راه‌اندازی سلف"),
+        ("m:support", "🎧 پشتیبانی"),
+        ("m:tut",     "📚 آموزش‌ها"),
+        ("m:home",    "🏠 منوی اصلی"),
+    )
+    TUT_FOOT_FALLBACK = "👇"
+
+    def tut_sections(self, on_only=False):
+        """لیست بخش‌ها (نرمال‌شده، به ترتیب نمایش)."""
+        raw = self.cfg.get("tut_sections") or []
+        out = []
+        if not isinstance(raw, list):
+            return out
+        for i, s in enumerate(raw):
+            d = self.tut_norm(s, i)
+            if on_only and not d["on"]:
+                continue
+            out.append(d)
+        return out
+
+    @staticmethod
+    def tut_norm(s, idx=0):
+        """بخش خام را به شکلِ کامل و قابل‌اتکا درمی‌آورد (همه‌ی کلیدها همیشه)."""
+        s = s if isinstance(s, dict) else {}
+        try:
+            sid = int(s.get("id") or idx + 1)
+        except (TypeError, ValueError):
+            sid = idx + 1
+        try:
+            ids = [int(x) for x in (s.get("ids") or [])]
+        except (TypeError, ValueError):
+            ids = []
+        try:
+            chat = int(s.get("chat") or 0)
+        except (TypeError, ValueError):
+            chat = 0
+        try:
+            delay = max(0, int(s.get("delay") or 0))
+        except (TypeError, ValueError):
+            delay = 0
+        when = str(s.get("when") or "after_run")
+        if when not in dict(Manager.TUT_WHENS):
+            when = "after_run"
+        return {
+            "id": sid,
+            "name": str(s.get("name") or f"بخش {sid}")[:60],
+            "emoji": str(s.get("emoji") or "▫️")[:4],
+            "chat": chat,
+            "ids": ids,
+            "when": when,
+            "delay": delay,
+            "on": bool(s.get("on", True)),
+            "once": bool(s.get("once", True)),
+            "header": bool(s.get("header", False)),
+            "note": str(s.get("note") or "")[:1000],
+            "btn_label": str(s.get("btn_label") or "")[:40],
+            "btn_cmd": str(s.get("btn_cmd") or "")[:64],
+        }
+
+    def tut_when_label(self, when):
+        return dict(self.TUT_WHENS).get(when, when)
+
+    def tut_sec_label(self, s):
+        return f"{s.get('emoji') or '▫️'} {s.get('name') or 'بخش'}"
+
+    def tut_next_id(self):
+        return max([0] + [s["id"] for s in self.tut_sections()]) + 1
+
+    def tut_find(self, sid):
+        try:
+            sid = int(sid)
+        except (TypeError, ValueError):
+            return None
+        for s in self.tut_sections():
+            if s["id"] == sid:
+                return s
+        return None
+
+    def tut_save(self, rows):
+        self.cfg["tut_sections"] = [self.tut_norm(s, i) for i, s in enumerate(rows)]
+        self.cfg.save()
+        return self.cfg["tut_sections"]
+
+    def tut_update(self, sid, **kw):
+        rows = self.tut_sections()
+        hit = None
+        for s in rows:
+            if s["id"] == int(sid):
+                s.update({k: v for k, v in kw.items() if k in s})
+                hit = s
+                break
+        if hit is None:
+            return None
+        self.tut_save(rows)
+        return self.tut_find(sid)
+
+    def tut_new(self, name="بخش جدید", emoji="▫️"):
+        rows = self.tut_sections()
+        sid = self.tut_next_id()
+        rows.append(self.tut_norm({"id": sid, "name": name, "emoji": emoji,
+                                   "when": "after_run", "on": True, "once": True}))
+        self.tut_save(rows)
+        return self.tut_find(sid)
+
+    def tut_remove(self, sid):
+        rows = [s for s in self.tut_sections() if s["id"] != int(sid)]
+        self.tut_save(rows)
+        return True
+
+    def tut_move(self, sid, delta):
+        """جای بخش را در لیست عوض می‌کند (ترتیب ارسال)."""
+        rows = self.tut_sections()
+        idx = next((i for i, s in enumerate(rows) if s["id"] == int(sid)), None)
+        if idx is None:
+            return False
+        j = max(0, min(len(rows) - 1, idx + int(delta)))
+        if j == idx:
+            return False
+        rows.insert(j, rows.pop(idx))
+        self.tut_save(rows)
+        return True
+
+    def tut_btn_rows(self, s):
+        """دکمه‌های شیشه‌ای پایانِ یک بخش (از روی btn_label/btn_cmd)."""
+        cmd = (s.get("btn_cmd") or "").strip()
+        if not cmd:
+            return []
+        label = (s.get("btn_label") or "").strip() or \
+            dict(self.TUT_TARGETS).get(cmd, "ادامه")
+        if cmd.startswith(("http://", "https://", "tg://")):
+            try:
+                from telethon import Button
+                return [[Button.url(label, cmd)]]
+            except Exception as e:
+                print("tut url btn:", type(e).__name__, e)
+                return []
+        return [[B(label, cmd, "success")]]
+
+    async def tut_send_section(self, uid, sid, force=False, header=False):
+        """یک بخش را برای کاربر می‌فرستد: محتوا + (در آخر) دکمه‌ی پایان.
+
+        force=True یعنی حتی اگر قبلاً رفته، دوباره برود (مثلاً کاربر خودش
+        تگ را زده). با once=False همیشه می‌رود.
+        """
+        s = self.tut_find(sid)
+        if not s or not s["on"]:
+            return False
+        if s["once"] and not force and self.db.tut_done(uid, s["id"]):
+            return False
+        buttons = self.tut_btn_rows(s)
+        show_hdr = bool(header or s.get("header"))
+        if show_hdr:
+            allsec = self.tut_sections(on_only=True)
+            pos = next((i for i, x in enumerate(allsec) if x["id"] == s["id"]), 0) + 1
+            await self.say(uid,
+                f"🧩 <b>بخش {_fa_digits(pos)} از {_fa_digits(len(allsec))}"
+                f" — {s['name']}</b>", None)
+        msgs = await self._tut_load(s["chat"], s["ids"])
+        ok = 0
+        attached = False
+        # اگر مدیر «متن پایان» نوشته، آن متن با دکمه می‌رود (پیام پایانی جدا)،
+        # وگرنه دکمه روی آخرین پیامِ محتوا می‌نشیند.
+        attach = bool(buttons) and not s["note"]
+        if msgs:
+            ok, attached = await self._tut_copy(uid, msgs, s["chat"],
+                                                buttons if attach else None)
+        if buttons and (s["note"] or not attached):
+            # key مخصوصِ همین بخش: متنِ پایانِ تکراریِ دو بخش با هم قاطی نشود
+            await self.say(uid, s["note"] or self.TUT_FOOT_FALLBACK, buttons,
+                           key=f"tut:{s['id']}")
+        elif s["note"]:
+            await self.say(uid, s["note"], None, key=f"tut:{s['id']}")
+        if not msgs and not buttons and not s["note"]:
+            return False
+        self.db.tut_mark(uid, s["id"])
+        self.db.log(uid, "tut_sec", f"#{s['id']} {s['name']}")
+        return True
+
+    async def tut_fire(self, uid, when, force=False):
+        """همه‌ی بخش‌های یک رویداد را به ترتیب می‌فرستد (با فاصله‌ی خودشان)."""
+        n = 0
+        for s in self.tut_sections(on_only=True):
+            if s["when"] != when:
+                continue
+            if s["delay"]:
+                await asyncio.sleep(s["delay"])
+            if await self.tut_send_section(uid, s["id"], force=force):
+                n += 1
+        # بعد از فعال‌سازی، تگِ همه‌ی بخش‌ها را هم یک‌جا می‌دهیم تا کاربر
+        # هر آموزش را بعداً با یک دکمه بگیرد.
+        if n and when == "after_run":
+            await self.tut_send_menu(uid)
+        return n
+
+    def tut_pending_sections(self, uid, when, force=False):
+        """بخش‌هایی که برای این کاربر در این رویداد باید بروند (بدون ارسال)."""
+        out = []
+        for s in self.tut_sections(on_only=True):
+            if s["when"] != when:
+                continue
+            if s["once"] and not force and self.db.tut_done(uid, s["id"]):
+                continue
+            out.append(s)
+        return out
+
+    def tut_schedule(self, uid, when, wait=0, force=False):
+        """ارسال بخش‌های یک رویداد را در پس‌زمینه می‌اندازد (بدون بلوکه‌کردن).
+
+        اگر بخشی برای این رویداد نباشد، هیچ تسکی ساخته نمی‌شود.
+        """
+        try:
+            if not self.tut_pending_sections(uid, when, force):
+                return False
+        except Exception as e:
+            print("tut_schedule:", type(e).__name__, e)
+            return False
+
+        async def _run():
+            try:
+                if wait and int(wait) > 0:
+                    await asyncio.sleep(int(wait))
+                await self.tut_fire(uid, when, force=force)
+            except Exception as e:
+                print("tut_run:", type(e).__name__, e)
+        try:
+            asyncio.create_task(_run())
+            return True
+        except RuntimeError:
+            return False
+
+    async def tut_send_menu(self, uid):
+        """تگِ همه‌ی بخش‌های فعال را به کاربر نشان می‌دهد."""
+        secs = self.tut_sections(on_only=True)
+        if not secs:
+            return False
+        kb = [[B(self.tut_sec_label(s), f"tut:s:{s['id']}", "success")]
+              for s in secs]
+        kb.append([B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")])
+        kb.append(back_btn())
+        return await self.say(uid,
+            f"🧩 <b>بخش‌های آموزش</b>\n{self.LINE}\n"
+            f"{_fa_digits(len(secs))} بخش آماده است — هر کدام را خواستی بزن:",
+            kb)
+
+    # ─────────── پنل مدیر: مدیریت بخش‌ها ───────────
+    async def tut_admin_list(self, ev):
+        """صفحه‌ی «🧩 بخش‌های آموزش» در پنل مدیر."""
+        secs = self.tut_sections()
+        txt = [f"🧩 <b>بخش‌های آموزش</b>", self.LINE,
+               "هر بخش = یک تگ برای کاربر: محتوا + زمان ارسال + دکمه‌ی پایان.",
+               self.LINE]
+        kb = [[B("➕ بخش جدید", "a:sec_add", "success")]]
+        if not secs:
+            txt.append("<i>هنوز بخشی نساخته‌ای. با «➕ بخش جدید» شروع کن.</i>")
+        for s in secs:
+            n = len(s["ids"])
+            txt.append(f"{'🟢' if s['on'] else '⚪'} {self.tut_sec_label(s)} — "
+                       f"{_fa_digits(n)} پیام — {self.tut_when_label(s['when'])}")
+            kb.append([B(("🟢" if s["on"] else "⚪") + " " + self.tut_sec_label(s),
+                         f"a:sec:{s['id']}",
+                         "success" if s["on"] else "primary")])
+        kb.append([B("⚙️ ارسال خودکار بعد از فعال‌سازی", "a:tut_auto", "primary")])
+        kb.append([B("📚 آموزش فعال‌سازی (اصلی)", "a:tut", "success")])
+        kb.append(back_btn("a:home"))
+        return await self.edit(ev, "\n".join(txt), kb)
+
+    async def tut_admin_one(self, ev, sid):
+        """صفحه‌ی یک بخش."""
+        s = self.tut_find(sid)
+        if not s:
+            return await self.edit(ev, "این بخش پیدا نشد.",
+                                   [back_btn("a:secs")])
+        n = len(s["ids"])
+        btn = (f"<b>{s['btn_label'] or '—'}</b> → <code>{s['btn_cmd']}</code>"
+               if s["btn_cmd"] else "ندارد")
+        warn = [] if n else ["", "⚠️ <i>محتوایی ثبت نشده — با «📤 ثبت محتوا» پیام‌ها را بفرست.</i>"]
+        txt = (f"{self.tut_sec_label(s)}   (کد {_fa_digits(s['id'])})\n{self.LINE}\n"
+               f"🎛 زمان ارسال: {self.tut_when_label(s['when'])}\n"
+               f"⏱ فاصله: {_fa_digits(s['delay'])} ثانیه بعد از بخش قبلی\n"
+               f"📦 محتوا: {_fa_digits(n)} پیام{'  ✅' if n else ''}\n"
+               f"🔚 دکمه‌ی پایان: {btn}\n"
+               f"📝 متن پایان: {s['note'] or '—'}\n"
+               f"🔁 {'یک‌بار برای هر کاربر' if s['once'] else 'هر بار'}"
+               f"   ·   🏷 سرتیتر: {'روشن' if s['header'] else 'خاموش'}\n"
+               f"وضعیت: {'🟢 فعال' if s['on'] else '🔴 خاموش'}"
+               + "\n".join(warn))
+        kb = [
+            [B("📤 ثبت / تغییر محتوا", f"a:sec_set:{sid}", "success")],
+            [B("👁 پیش‌نمایش", f"a:sec_vw:{sid}", "primary"),
+             B("🗑 پاک‌کردن محتوا", f"a:sec_clr:{sid}", "danger")],
+            [B("🎛 زمان ارسال", f"a:sec_when:{sid}", "primary"),
+             B("⏱ فاصله (ثانیه)", f"a:sec_dly:{sid}", "primary")],
+            [B("🔚 دکمه‌ی پایان بخش", f"a:sec_btn:{sid}", "success"),
+             B("📝 متن پایان", f"a:sec_note:{sid}", "primary")],
+            [B("🏷 نام بخش", f"a:sec_rn:{sid}", "primary"),
+             B("🎨 ایموجی", f"a:sec_em:{sid}", "primary")],
+            [B("⬆️ بالا", f"a:sec_up:{sid}"), B("⬇️ پایین", f"a:sec_dn:{sid}"),
+             B(("🔁 یک‌بار" if s["once"] else "♾ همیشه"), f"a:sec_once:{sid}")],
+            [B(("🏷 سرتیتر ✅" if s["header"] else "🏷 سرتیتر ⚪"), f"a:sec_hdr:{sid}"),
+             B(("🔴 خاموش" if s["on"] else "🟢 روشن"), f"a:sec_on:{sid}")],
+            [B("🗑 حذف بخش", f"a:sec_rm:{sid}", "danger")],
+            back_btn("a:secs")]
+        return await self.edit(ev, txt, kb)
+
+    async def tut_admin_when(self, ev, sid):
+        """انتخاب زمان ارسال بخش."""
+        s = self.tut_find(sid)
+        if not s:
+            return await self.edit(ev, "این بخش پیدا نشد.", [back_btn("a:secs")])
+        kb = [[B(("✅ " if s["when"] == w else "") + lbl, f"a:sec_w:{sid}:{w}",
+                 "success" if s["when"] == w else "primary")]
+              for w, lbl in self.TUT_WHENS]
+        kb.append([B("⬅️ بخش", f"a:sec:{sid}")])
+        return await self.edit(ev,
+            f"🎛 <b>زمان ارسال — {s['name']}</b>\n{self.LINE}\n"
+            "• خودکار: به‌محض وقوع آن رویداد برای کاربر می‌رود.\n"
+            "• فقط با دکمه: فقط وقتی خودِ کاربر تگِ بخش را بزند.", kb)
+
+    async def tut_admin_btn(self, ev, sid):
+        """انتخاب دکمه‌ی پایان بخش (مثلاً «💳 شارژ کیف پول»)."""
+        s = self.tut_find(sid)
+        if not s:
+            return await self.edit(ev, "این بخش پیدا نشد.", [back_btn("a:secs")])
+        kb = [[B(("✅ " if s["btn_cmd"] == cmd else "") + lbl,
+                 f"a:sec_b:{sid}:{cmd}", "success")]
+              for cmd, lbl in self.TUT_TARGETS]
+        kb.append([B("🔗 دکمه‌ی لینک (URL)", f"a:sec_burl:{sid}", "primary")])
+        if s["btn_cmd"]:
+            kb.append([B("🗑 حذف دکمه", f"a:sec_bdel:{sid}", "danger")])
+        kb.append([B("✏️ متن دکمه", f"a:sec_bl:{sid}", "primary")])
+        kb.append([B("⬅️ بخش", f"a:sec:{sid}")])
+        return await self.edit(ev,
+            f"🔚 <b>دکمه‌ی پایان بخش — {s['name']}</b>\n{self.LINE}\n"
+            f"دکمه‌ی فعلی: "
+            + (f"<b>{s['btn_label']}</b> → <code>{s['btn_cmd']}</code>"
+               if s["btn_cmd"] else "ندارد") + "\n\n"
+            "این دکمه <b>آخرِ</b> محتوای بخش می‌آید — مثلاً آخرِ آموزشِ کیف "
+            "پول، دکمه‌ی «💳 شارژ کیف پول»؛ آخرِ آموزشِ اشتراک، دکمه‌ی "
+            "«💎 اشتراک ماهانه».", kb)
 
     async def admin_users_page(self, ev, page=0):
         rows = self.db.all()
@@ -3352,8 +3810,12 @@ class Manager:
                                              "verify_phone", "verify_referral", "bcast", "disc_new",
                                              "price_plan", "price_pack",
                                              "gp_n", "say_u", "card_set", "welcome_set",
-                                             "ok_days", "acct_n", "fjoin_add", "tut_set"):
-            keep = data in ("wq:0", "kc:x", "a:tut_done") or (
+                                             "ok_days", "acct_n", "fjoin_add", "tut_set",
+                                             "sec_set", "sec_name", "sec_emoji",
+                                             "sec_delay", "sec_note", "sec_btn_url",
+                                             "sec_btn_label", "tut_wait"):
+            keep = data in ("wq:0", "kc:x", "a:tut_done") \
+                or data.startswith(("a:sec_done",)) or (
                 st_now.get("step") in ("verify_phone", "verify_referral") and data.startswith(("ko:", "o:", "wq:", "kc:", "kp:")))
             if st_now.get("step") in ("verify_phone", "verify_referral") and data not in ("m:home",):
                 keep = True
@@ -3404,6 +3866,23 @@ class Manager:
         if data == "m:tut":
             await ans("در حال ارسال…")
             return await self.send_tutorial(uid)
+
+        # تگِ یک بخش آموزش: کاربر دکمه را می‌زند → همان بخش برایش می‌رود
+        if data.startswith("tut:s:"):
+            sid = int(digits(data.split(":")[-1]) or 0)
+            sec = self.tut_find(sid)
+            if not sec or not sec["on"]:
+                await ans("این بخش فعلاً موجود نیست")
+                return await self.edit(ev, "این بخش فعلاً موجود نیست.",
+                                       [back_btn("m:tut")])
+            await ans("در حال ارسال…")
+            ok = await self.tut_send_section(uid, sid, force=True)
+            if not ok:
+                await self.edit(ev,
+                    "⚠️ محتوای این بخش ثبت نشده.\n"
+                    "اگر تازه اضافه شده، کمی بعد دوباره امتحان کن.",
+                    [back_btn("m:tut")])
+            return
 
         if data == "m:status":
             await ans()
@@ -3743,6 +4222,11 @@ class Manager:
                     "\n\nاگر از اکانت خارج شده‌ای، ورود دوباره را بزن:",
                     [[B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")],
                      back_btn("m:svc")])
+            # روشن کردن دستی سرویس هم مثل فعال‌سازی، بخش‌های آموزش را می‌فرستد
+            # (بخش‌های «یک‌بار برای هر کاربر» دوباره تکرار نمی‌شوند)
+            if ok and act == "on" and self.cfg.get("tut_auto", True):
+                self.tut_schedule(uid, "after_run",
+                                  wait=int(self.cfg.get("tut_auto_wait", 8) or 0))
             live = self.sup.is_running(uid)
             body = f"⚙️ <b>سرویس من</b>\n\n{('✅ ' if ok else '❌ ')}{msg}\n"
             if fee_msg and ok:
@@ -4038,6 +4522,7 @@ class Manager:
                       [B("👁 پیش‌نمایش", "a:tut_view", "primary")]]
                 if chat and n:
                     kb.append([B("🗑 پاک کردن محتوا", "a:tut_del", "danger")])
+                kb.append([B("🧩 بخش‌بندی آموزش (تگ‌ها)", "a:secs", "success")])
                 kb.append(back_btn("a:home"))
                 return await self.edit(ev,
                     f"🎬 <b>آموزش فعال‌سازی</b>\n{self.LINE}\n"
@@ -4098,6 +4583,265 @@ class Manager:
                     "از این به بعد متن پیش‌فرض برای کاربر می‌رود.",
                     [[B("📤 ثبت دوباره", "a:tut_set", "success")],
                      [B("⬅️ بازگشت", "a:tut")]])
+
+            # ── بخش‌بندی آموزش (تگ‌ها) ──
+            if k == "secs":
+                return await self.tut_admin_list(ev)
+            if k == "sec_add":
+                s = self.tut_new()
+                if not s:
+                    return await self.edit(ev, "ساخت بخش نشد.",
+                                           [back_btn("a:secs")])
+                self.db.log(uid, "sec_new", f"#{s['id']}")
+                return await self.edit(ev,
+                    f"✅ بخش جدید ساخته شد: <b>{self.tut_sec_label(s)}</b>\n\n"
+                    "حالا سه کار:\n"
+                    "1️⃣ «📤 ثبت / تغییر محتوا» → ویدیو/عکس/متنِ آموزش را بفرست\n"
+                    "2️⃣ «🎛 زمان ارسال» → مثلاً بعد از فعال‌سازی سلف (خودکار)\n"
+                    "3️⃣ «🔚 دکمه‌ی پایان بخش» → مثلاً «💳 شارژ کیف پول»\n\n"
+                    "<i>اسم بخش را هم با «🏷 نام بخش» عوض کن.</i>",
+                    [[B("🧩 باز کردن بخش", f"a:sec:{s['id']}", "success")],
+                     back_btn("a:secs")])
+            if k.startswith("sec:"):
+                return await self.tut_admin_one(ev, int(digits(k[4:]) or 0))
+            if k.startswith("sec_when:"):
+                return await self.tut_admin_when(ev, int(digits(k[9:]) or 0))
+            if k.startswith("sec_btn:"):
+                return await self.tut_admin_btn(ev, int(digits(k[8:]) or 0))
+            if k.startswith("sec_w:"):
+                parts = k.split(":")
+                sid = int(digits(parts[1]) or 0)
+                when = parts[2] if len(parts) > 2 else ""
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.tut_update(sid, when=when)
+                self.db.log(uid, "sec_when", f"#{sid} {when}")
+                return await self.tut_admin_one(ev, sid)
+            if k.startswith("sec_b:"):
+                parts = k.split(":")
+                sid = int(digits(parts[1]) or 0)
+                cmd = ":".join(parts[2:])
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                label = s["btn_label"] or dict(self.TUT_TARGETS).get(cmd, "ادامه")
+                self.tut_update(sid, btn_cmd=cmd, btn_label=label)
+                self.db.log(uid, "sec_btn", f"#{sid} {cmd}")
+                return await self.tut_admin_btn(ev, sid)
+            if k.startswith("sec_burl:"):
+                sid = int(digits(k[8:]) or 0)
+                if not self.tut_find(sid):
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.fsm[uid] = {"step": "sec_btn_url", "sec_id": sid}
+                return await self.edit(ev,
+                    f"🔗 <b>دکمه‌ی لینک</b>\n{self.LINE}\n"
+                    "لینک را بفرست — مثل:\n"
+                    "<code>https://t.me/mychannel</code>\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_bdel:"):
+                sid = int(digits(k[9:]) or 0)
+                self.tut_update(sid, btn_cmd="", btn_label="")
+                return await self.tut_admin_btn(ev, sid)
+            if k.startswith("sec_bl:"):
+                sid = int(digits(k[7:]) or 0)
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                if not s["btn_cmd"]:
+                    return await self.edit(ev,
+                        "اول با «🔚 دکمه‌ی پایان بخش» یک دکمه انتخاب کن، "
+                        "بعد متنش را عوض کن.", [back_btn(f"a:sec:{sid}")])
+                self.fsm[uid] = {"step": "sec_btn_label", "sec_id": sid}
+                return await self.edit(ev,
+                    f"✏️ <b>متن دکمه</b>\n{self.LINE}\n"
+                    f"فعلی: <b>{s['btn_label'] or '—'}</b>\n\n"
+                    "متن جدید را بفرست (مثلاً: <code>💳 شارژ کیف پول</code>)\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_rn:"):
+                sid = int(digits(k[7:]) or 0)
+                if not self.tut_find(sid):
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.fsm[uid] = {"step": "sec_name", "sec_id": sid}
+                return await self.edit(ev,
+                    f"🏷 <b>نام بخش</b>\n{self.LINE}\n"
+                    "اسمی که کاربر روی دکمه می‌بیند را بفرست.\n"
+                    "مثال: <code>آموزش کامل پنل جفج</code>\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_em:"):
+                sid = int(digits(k[7:]) or 0)
+                if not self.tut_find(sid):
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.fsm[uid] = {"step": "sec_emoji", "sec_id": sid}
+                return await self.edit(ev,
+                    f"🎨 <b>ایموجی بخش</b>\n{self.LINE}\n"
+                    "یک ایموجی بفرست؛ مثل: 🎬 💳 🎯 💎 📚\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_dly:"):
+                sid = int(digits(k[8:]) or 0)
+                if not self.tut_find(sid):
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.fsm[uid] = {"step": "sec_delay", "sec_id": sid}
+                return await self.edit(ev,
+                    f"⏱ <b>فاصله‌ی بخش</b>\n{self.LINE}\n"
+                    "چند ثانیه <b>بعد از بخش قبلی</b> ارسال شود؟\n"
+                    "مثال: <code>0</code> (درجا) یا <code>60</code> (یک دقیقه بعد)\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_note:"):
+                sid = int(digits(k[9:]) or 0)
+                if not self.tut_find(sid):
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.fsm[uid] = {"step": "sec_note", "sec_id": sid}
+                return await self.edit(ev,
+                    f"📝 <b>متن پایان بخش</b>\n{self.LINE}\n"
+                    "این متن <b>آخرِ</b> محتوای بخش، همراه دکمه‌ی پایان می‌رود.\n"
+                    "مثال: <code>برای شارژ کیف پول دکمه‌ی زیر را بزن 👇</code>\n\n"
+                    "برای حذف بنویس: <code>خاموش</code>\n\n"
+                    "<i>/cancel برای لغو</i>",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_up:") or k.startswith("sec_dn:"):
+                up = k.startswith("sec_up:")
+                sid = int(digits(k.split(":", 1)[1]) or 0)
+                self.tut_move(sid, -1 if up else 1)
+                return await self.tut_admin_one(ev, sid)
+            if k.startswith("sec_once:") or k.startswith("sec_hdr:") or \
+                    k.startswith("sec_on:"):
+                key, sid_s = k.split(":", 1)
+                sid = int(digits(sid_s) or 0)
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                field = {"sec_once": "once", "sec_hdr": "header",
+                         "sec_on": "on"}[key]
+                self.tut_update(sid, **{field: not s[field]})
+                return await self.tut_admin_one(ev, sid)
+            if k.startswith("sec_clr:"):
+                sid = int(digits(k[8:]) or 0)
+                self.tut_update(sid, chat=0, ids=[])
+                self.db.log(uid, "sec_clr", f"#{sid}")
+                return await self.edit(ev,
+                    "🗑 محتوای این بخش پاک شد.",
+                    [[B("⬅️ بخش", f"a:sec:{sid}")], back_btn("a:secs")])
+            if k.startswith("sec_vw:"):
+                sid = int(digits(k[7:]) or 0)
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                ok = await self.tut_send_section(uid, sid, force=True)
+                return await self.edit(ev,
+                    ("👁 <b>پیش‌نمایش</b>\n همین را کاربر می‌گیرد — "
+                     "پیام‌های همین چت را ببین."
+                     if ok else
+                     "⚠️ این بخش محتوایی ندارد.\nبا «📤 ثبت محتوا» پیام‌ها را بفرست."),
+                    [[B("⬅️ بخش", f"a:sec:{sid}")]])
+            if k.startswith("sec_rm:"):
+                sid = int(digits(k[7:]) or 0)
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                return await self.edit(ev,
+                    f"🗑 بخش <b>{s['name']}</b> پاک شود؟\n"
+                    "<i>محتوای داخل تلگرام پاک نمی‌شود؛ فقط این بخش از پنل.</i>",
+                    [[B("✅ بله، پاک کن", f"a:sec_rm_y:{sid}", "danger")],
+                     [B("⬅️ نه", f"a:sec:{sid}")]])
+            if k.startswith("sec_rm_y:"):
+                sid = int(digits(k[9:]) or 0)
+                self.tut_remove(sid)
+                self.db.log(uid, "sec_rm", f"#{sid}")
+                return await self.edit(ev, "🗑 بخش حذف شد.",
+                                       [back_btn("a:secs")])
+            if k == "tut_auto":
+                on = not bool(self.cfg.get("tut_auto", True))
+                self.cfg["tut_auto"] = on
+                self.cfg.save()
+                secs = [s for s in self.tut_sections(on_only=True)
+                        if s["when"] == "after_run"]
+                return await self.edit(ev,
+                    f"⚙️ <b>ارسال خودکار بعد از فعال‌سازی</b>\n{self.LINE}\n"
+                    f"وضعیت: {'🟢 روشن' if on else '🔴 خاموش'}\n"
+                    f"⏱ تأخیر: {_fa_digits(self.cfg.get('tut_auto_wait', 8))} ثانیه\n"
+                    f"🧩 بخش‌های این رویداد: {_fa_digits(len(secs))}\n\n"
+                    "وقتی کاربر سلف را روی اکانتش روشن کند، این بخش‌ها خودکار "
+                    "برای او می‌روند (هر بخش با فاصله‌ی خودش).",
+                    [[B("🔴 خاموش کن" if on else "🟢 روشن کن", "a:tut_auto",
+                        "danger" if on else "success")],
+                     [B("⏱ تغییر تأخیر", "a:tut_wait", "primary")],
+                     back_btn("a:secs")])
+            if k == "tut_wait":
+                self.fsm[uid] = {"step": "tut_wait"}
+                return await self.edit(ev,
+                    f"⏱ <b>تأخیر ارسال خودکار</b>\n{self.LINE}\n"
+                    "چند ثانیه بعد از پیام «راه‌اندازی شد»، بخش‌ها شروع شوند؟\n"
+                    "فعلی: {0} ثانیه\n\n"
+                    "مثال: <code>8</code>\n\n"
+                    "<i>/cancel برای لغو</i>".format(
+                        _fa_digits(self.cfg.get("tut_auto_wait", 8))),
+                    [[B("⬅️ بازگشت", "a:tut_auto")]])
+            if k.startswith("sec_done"):
+                st_sec = self.fsm.get(uid) or {}
+                sid = int(st_sec.get("sec_id") or 0)
+                pend = list(st_sec.get("tut_pending") or [])
+                kb_back = ([[B("🧩 همان بخش", f"a:sec:{sid}", "success")]]
+                           if sid else [])
+                kb_back.append(back_btn("a:secs"))
+                if not sid:
+                    return await self.edit(ev, "بخشی انتخاب نشده بود.", kb_back)
+                if not pend:
+                    kb = [[B("✅ تمام شد — ذخیره", f"a:sec_done:{sid}", "success")],
+                          back_btn(f"a:sec:{sid}")]
+                    return await self.edit(ev,
+                        "❌ هنوز پیامی ثبت نشده.\n"
+                        "اول محتوا را بفرست (ویدیو، عکس، متن…)، بعد «✅ تمام شد».",
+                        kb)
+                self.fsm.pop(uid, None)
+                chat = int(st_sec.get("tut_chat") or uid)
+                self.tut_update(sid, chat=chat, ids=pend)
+                self.db.log(uid, "sec_set", f"#{sid} {len(pend)} پیام")
+                s = self.tut_find(sid) or {"name": "", "id": sid}
+                return await self.edit(ev,
+                    f"✅ <b>محتوای بخش ذخیره شد</b>\n{self.LINE}\n"
+                    f"🧩 {s.get('name')}\n"
+                    f"📦 {_fa_digits(len(pend))} پیام ثبت شد.\n\n"
+                    "از «👁 پیش‌نمایش» ببین کاربر دقیقاً چه می‌گیرد.",
+                    [[B("👁 پیش‌نمایش", f"a:sec_vw:{sid}", "primary")],
+                     [B("🎛 زمان ارسال", f"a:sec_when:{sid}", "primary")],
+                     back_btn("a:secs")])
+            if k.startswith("sec_set:"):
+                sid = int(digits(k[8:]) or 0)
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:secs")])
+                self.fsm[uid] = {"step": "sec_set", "sec_id": sid,
+                                 "tut_chat": 0, "tut_pending": []}
+                return await self.edit(ev,
+                    f"📤 <b>ثبت محتوای «{s['name']}»</b>\n{self.LINE}\n"
+                    "محتوا را <b>همین‌جا</b> بفرست — هر چیزی:\n"
+                    "• 📝 متن و لینک\n"
+                    "• 🎬 ویدیو / 🖼 عکس / 🎤 ویس / 📎 فایل / 🎨 استیکر\n"
+                    "• 🖼🖼 آلبوم (چند مدیا با هم)\n\n"
+                    "به همان ترتیبی که می‌فرستی، برای کاربر می‌رود؛ "
+                    "متن و کپشن‌ها دست‌نخورده می‌مانند.\n"
+                    "تمام شد؟ «✅ تمام شد — ذخیره» را بزن.\n\n"
+                    "<i>هر دکمه‌ی دیگر = لغو</i>",
+                    [[B("✅ تمام شد — ذخیره", f"a:sec_done:{sid}", "success")],
+                     [B("⬅️ بخش", f"a:sec:{sid}")]])
             if k == "fjoin":
                 rows = self.force_chans()
                 txt = [f"📣 <b>جوین اجباری</b>", self.LINE,
@@ -5342,6 +6086,8 @@ class Manager:
                     f"موجودی: <b>{money(nb)}</b>\n{self.LINE}\n\n"
                     f"<i>می‌توانی هنگام خرید اشتراک یا امتیاز خرجش کنی.</i>",
                     [[B("💳 کیف پول", "m:wallet", "primary")]])
+                # آموزش‌های «بعد از شارژ کیف پول»
+                self.tut_schedule(o["uid"], "after_wallet", wait=3)
                 return await self.say(chat,
                     f"✅ سفارش #{_fa_digits(oid)} تأیید شد — {money(o['final'])}\n"
                     f"💳 کیف پول {o['uid']}: {money(nb)}")
@@ -5382,6 +6128,8 @@ class Manager:
                       "🚀 حالا سلف را روی اکانتت راه بینداز.")),
                     [[B("🎯 امتیاز من", "m:pts", "success")]] if c and c["session"]
                     else [[B("🚀 راه‌اندازی سلف", "s:setup", "primary")]])
+                # آموزش‌های «بعد از خرید امتیاز»
+                self.tut_schedule(o["uid"], "after_points", wait=3)
                 return await self.say(chat,
                     f"✅ سفارش #{_fa_digits(oid)} تأیید شد — {money(o['final'])}\n"
                     f"🎯 {_fa_digits(o['points'])} امتیاز به {o['uid']} اضافه شد "
@@ -5419,6 +6167,8 @@ class Manager:
                  else "حالا سلف را روی اکانتت راه بینداز."),
                 [[B("⚙️ سرویس من", "m:svc", "primary")]] if c and c["session"]
                 else [[B("🚀 راه‌اندازی سلف", "s:setup", "primary")]])
+            # آموزش‌های «بعد از خرید اشتراک ماهانه»
+            self.tut_schedule(o["uid"], "after_sub", wait=3)
             return await self.say(chat,
                 f"✅ سفارش #{_fa_digits(oid)} تأیید شد — {money(o['final'])}\n"
                 f"اعتبار مشتری: {human_left(nc['expires_at'])}")
@@ -7045,9 +7795,10 @@ class Manager:
             if st0 and not text.startswith("/"):
                 stp = st0.get("step")
 
-                if stp == "tut_set" and self.is_admin(uid):
-                    # ثبت محتوای آموزش فعال‌سازی — هر نوع پیامی: متن، لینک،
-                    # عکس، ویدیو، ویس، فایل، استیکر، آلبوم (هر آیتم جدا می‌آید)
+                if (stp == "tut_set" or stp == "sec_set") and self.is_admin(uid):
+                    # ثبت محتوای آموزش فعال‌سازی / یک بخش — هر نوع پیامی:
+                    # متن، لینک، عکس، ویدیو، ویس، فایل، استیکر، آلبوم
+                    # (هر آیتم جدا می‌آید). برای بخش‌ها id بخش هم نگه داشته می‌شود.
                     pend = st0.setdefault("tut_pending", [])
                     st0.setdefault("tut_chat", ev.chat_id)
                     pend.append(ev.id)
@@ -7071,10 +7822,87 @@ class Manager:
                         kind = "📝 متن"
                     else:
                         kind = "💬 پیام"
+                    if stp == "sec_set":
+                        sec_now = self.tut_find(st0.get("sec_id") or 0) or {}
+                        head = f"🧩 بخش: {sec_now.get('name') or '—'}\n"
+                        btn = f"a:sec_done:{st0.get('sec_id') or 0}"
+                    else:
+                        head = ""
+                        btn = "a:tut_done"
                     return await self.say(ev.chat_id,
                         f"➕ ثبت شد: {kind}\n"
                         f"📦 مجموع: {_fa_digits(len(pend))} پیام\n"
-                        "<i>تمام شد؟ دکمه‌ی «✅ تمام شد» در پیامِ بالا را بزن.</i>")
+                        f"{head}"
+                        "<i>تمام شد؟ دکمه‌ی «✅ تمام شد» در پیامِ بالا را بزن.</i>",
+                        [[B("✅ تمام شد — ذخیره", btn, "success")]])
+
+                # ── بخش‌های آموزش: ورودی‌های متنی پنل مدیر ──
+                if stp == "sec_name" and self.is_admin(uid):
+                    sid = int(st0.get("sec_id") or 0)
+                    self.fsm.pop(uid, None)
+                    name = text.strip()[:60]
+                    if not name:
+                        return await self.say(ev.chat_id, "نام خالی بود؛ دوباره بفرست.")
+                    self.tut_update(sid, name=name)
+                    self.db.log(uid, "sec_name", f"#{sid} {name}")
+                    return await self.say(ev.chat_id, f"✅ نام بخش → <b>{name}</b>",
+                                          [[B("🧩 بخش", f"a:sec:{sid}", "success")],
+                                           back_btn("a:secs")])
+                if stp == "sec_emoji" and self.is_admin(uid):
+                    sid = int(st0.get("sec_id") or 0)
+                    self.fsm.pop(uid, None)
+                    em = text.strip()[:4] or "▫️"
+                    self.tut_update(sid, emoji=em)
+                    return await self.say(ev.chat_id, f"✅ ایموجی بخش → {em}",
+                                          [[B("🧩 بخش", f"a:sec:{sid}", "success")]])
+                if stp == "sec_delay" and self.is_admin(uid):
+                    sid = int(st0.get("sec_id") or 0)
+                    self.fsm.pop(uid, None)
+                    try:
+                        sec = max(0, int(digits(text) or 0))
+                    except (TypeError, ValueError):
+                        sec = 0
+                    self.tut_update(sid, delay=sec)
+                    return await self.say(ev.chat_id,
+                        f"✅ فاصله‌ی این بخش → {_fa_digits(sec)} ثانیه",
+                        [[B("🧩 بخش", f"a:sec:{sid}", "success")]])
+                if stp == "sec_note" and self.is_admin(uid):
+                    sid = int(st0.get("sec_id") or 0)
+                    self.fsm.pop(uid, None)
+                    note = "" if text.strip().lower() in ("خاموش", "پاک", "حذف", "-") \
+                        else text.strip()[:1000]
+                    self.tut_update(sid, note=note)
+                    return await self.say(ev.chat_id,
+                        "✅ متن پایان بخش " + ("حذف شد." if not note else "ذخیره شد."),
+                        [[B("🧩 بخش", f"a:sec:{sid}", "success")]])
+                if stp == "sec_btn_label" and self.is_admin(uid):
+                    sid = int(st0.get("sec_id") or 0)
+                    self.fsm.pop(uid, None)
+                    lbl = text.strip()[:40]
+                    if not lbl:
+                        return await self.say(ev.chat_id, "متن خالی بود؛ دوباره بفرست.")
+                    self.tut_update(sid, btn_label=lbl)
+                    return await self.say(ev.chat_id, f"✅ متن دکمه → {lbl}",
+                                          [[B("🧩 بخش", f"a:sec:{sid}", "success")]])
+                if stp == "sec_btn_url" and self.is_admin(uid):
+                    sid = int(st0.get("sec_id") or 0)
+                    self.fsm.pop(uid, None)
+                    url = text.strip()
+                    if not url.startswith(("http://", "https://", "tg://")):
+                        url = "https://" + url.lstrip("/")
+                    self.tut_update(sid, btn_cmd=url,
+                                    btn_label=(self.tut_find(sid) or {}).get("btn_label")
+                                    or "🔗 لینک")
+                    return await self.say(ev.chat_id, f"✅ دکمه‌ی لینک → <code>{url}</code>",
+                                          [[B("🧩 بخش", f"a:sec:{sid}", "success")]])
+                if stp == "tut_wait" and self.is_admin(uid):
+                    self.fsm.pop(uid, None)
+                    sec = max(0, int(digits(text) or 0))
+                    self.cfg["tut_auto_wait"] = sec
+                    self.cfg.save()
+                    return await self.say(ev.chat_id,
+                        f"✅ تأخیر ارسال خودکار → {_fa_digits(sec)} ثانیه",
+                        [[B("⚙️ ارسال خودکار", "a:tut_auto", "primary")]])
 
                 if stp == "disc":
                     self.fsm.pop(uid, None)
