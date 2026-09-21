@@ -2886,6 +2886,10 @@ class Manager:
         if ok and self.cfg.get("tut_auto", True):
             self.tut_schedule(uid, "after_run",
                               wait=int(self.cfg.get("tut_auto_wait", 8) or 0))
+            # سلف فعال شد → آموزش خودکار می‌رود؛ اگر مدیر بخشی نساخته باشد،
+            # متن آماده‌ی «بعد از فعال‌سازی» (یک‌بار برای هر کاربر) می‌رود
+            self.tut_schedule_self_default(
+                uid, wait=int(self.cfg.get("tut_auto_wait", 8) or 0))
 
         for a in self.cfg["admin_ids"]:
             await self.say(a, f"🆕 مشتری جدید\n{name}\nuid: <code>{uid}</code>\n"
@@ -3390,6 +3394,25 @@ class Manager:
         # تگِ بخش‌ها پایین آموزش
         return await self.tut_send_menu(uid)
 
+    async def send_menu_tutorial(self, uid, key):
+        """«📚 آموزش …» آخرِ منوهای کیف پول / خرید امتیاز / اشتراک ماهانه.
+
+        زدن دکمه = ارسال خودکارِ آموزشِ همان کار. محتوا قابل تنظیم است:
+        اگر مدیر برایش بخش ساخته/متن ثبت کرده (متن‌های آماده‌ی پنل) همان می‌رود؛
+        وگرنه متن آماده‌ی پیش‌فرض با دکمه‌ی همان کار — دکمه هیچ‌وقت خالی نیست.
+        """
+        if key not in self.TUT_MENU_KEYS:
+            return False
+        sec = self.tut_find_preset(key)
+        if sec and sec["on"]:
+            ok = await self.tut_send_section(uid, sec["id"], force=True)
+            if ok:
+                return True
+        lbl, cmd = self.TUT_MENU_FOOT[key]
+        return await self.say(uid, self.tut_preset_text(key) or DEFAULT_TUTORIAL,
+                              [[B(lbl, cmd, "success")], back_btn()],
+                              key=f"tut:x:{key}")
+
     # ═══════════════════════════════════════════════
     #  بخش‌بندی آموزش — هر بخش یک «تگ» که کاربر می‌زند
     #  (مدیر: محتوا + زمان ارسال + دکمه‌ی پایان بخش)
@@ -3468,7 +3491,7 @@ class Manager:
             "btn_cmd": str(s.get("btn_cmd") or "")[:64],
             # متنِ آماده‌ی بخش (HTML) — بدون نیاز به ثبت پیام از چت مدیر
             "text": str(s.get("text") or "")[:3500],
-            # اگر از یکی از سه متن آماده ساخته شده، کلیدش (wallet/points/after_run)
+            # اگر از یکی از متن‌های آماده ساخته شده، کلیدش (wallet/points/sub/after_run)
             "preset": str(s.get("preset") or "")[:20],
         }
 
@@ -3536,9 +3559,11 @@ class Manager:
         return True
 
     # ═══════════════════════════════════════════════
-    #  سه متنِ آماده‌ی آموزش — مدیر با یک دکمه از پنل می‌سازد
-    #  (کیف پول / خرید امتیاز / بعد از فعال‌سازی)
+    #  چهار متنِ آماده‌ی آموزش — مدیر با یک دکمه از پنل می‌سازد
+    #  (کیف پول / خرید امتیاز / اشتراک ماهانه / بعد از فعال‌سازی)
     #  متن‌ها با اعداد تنظیمات (حداقل شارژ، امتیاز هر ساعت…) پر می‌شوند.
+    #  دکمه‌های «📚 آموزش …» آخرِ منوهای کیف پول / خرید امتیاز / اشتراک ماهانه
+    #  (tut:x:…) هم همین متن‌ها را می‌فرستند.
     # ═══════════════════════════════════════════════
     TUT_PRESETS = (
         ("wallet", {
@@ -3553,6 +3578,12 @@ class Manager:
             "btn_cmd": "m:packs", "btn_label": "🎯 خرید امتیاز",
             "note": "برای خرید امتیاز دکمه‌ی زیر را بزن 👇",
         }),
+        ("sub", {
+            "name": "آموزش اشتراک ماهانه", "emoji": "💎",
+            "when": "after_sub",
+            "btn_cmd": "m:plans", "btn_label": "💎 اشتراک ماهانه",
+            "note": "برای خرید اشتراک ماهانه دکمه‌ی زیر را بزن 👇",
+        }),
         ("after_run", {
             "name": "بعد از فعال‌سازی", "emoji": "🚀",
             "when": "after_run",
@@ -3560,6 +3591,19 @@ class Manager:
             "note": "وضعیت سرویس و اعتبارت را از دکمه‌ی زیر ببین 👇",
         }),
     )
+
+    # کلید دکمه‌های «📚 آموزش …» آخرِ منوها (tut:x:<key>)
+    TUT_MENU_KEYS = ("wallet", "points", "sub")
+    # دکمه‌ی پایانِ متنِ پیش‌فرضِ هر آموزش — مقصد + برچسب
+    TUT_MENU_FOOT = {
+        "wallet": ("💳 شارژ کیف پول", "w:topup"),
+        "points": ("🎯 خرید امتیاز", "m:packs"),
+        "sub":    ("💎 اشتراک ماهانه", "m:plans"),
+        "after_run": ("⚙️ سرویس من", "m:svc"),
+    }
+    # شناسه‌ی رزرو در جدول tut_sent برای متن پیش‌فرضِ «بعد از فعال‌سازی»
+    # (وقتی مدیر هنوز بخشی نساخته) — یک‌بار برای هر کاربر
+    TUT_SELF_DEF_ID = 0
 
     def tut_preset_text(self, key):
         """متنِ آماده‌ی یک پیش‌فرض، با اعدادِ فعلیِ تنظیمات."""
@@ -3615,6 +3659,29 @@ class Manager:
                 "🎟 کد تخفیف داری؟ روی بسته، «🎟 دارم کد تخفیف» را بزن.\n"
                 "📋 موجودی و گردش امتیاز: «🎯 امتیاز من»."
             )
+        if key == "sub":
+            return (
+                f"💎 <b>آموزش اشتراک ماهانه</b>\n{L}\n"
+                "با اشتراک ماهانه، سلف تا پایان دوره روشن می‌ماند و هیچ امتیازی "
+                "مصرف نمی‌شود؛ یک‌بار پرداخت می‌کنی و تا پایان اشتراک خیالت راحت است.\n\n"
+                "<b>قدم ۱</b> — از منوی اصلی «💎 اشتراک ماهانه» را بزن.\n"
+                "<b>قدم ۲</b> — یک پلن را انتخاب کن — مدت، تعداد اکانت و قیمت هر "
+                "پلن نوشته شده است.\n"
+                "<b>قدم ۳</b> — پرداخت:\n"
+                "      • «💳 خرید با کیف پول» → درجا و بدون تأیید مدیر\n"
+                "      • «✅ خرید» → کارت‌به‌کارت + ارسال <b>عکس رسید</b>\n"
+                "      • «🎟 دارم کد تخفیف» → اگر کد تخفیف داری\n"
+                "<b>قدم ۴</b> — بعد از تأیید مدیر، اشتراک فعال می‌شود و پیام می‌گیری.\n\n"
+                f"{L}\n"
+                "💡 اگر الان هم اشتراک داشته باشی، دوره‌ی جدید به باقی‌مانده‌اش "
+                "اضافه می‌شود و از دست نمی‌رود.\n"
+                "💤 تا پایان اشتراک، امتیازی مصرف نمی‌شود و سرویس به‌خاطر کمبود "
+                "امتیاز قطع نمی‌شود.\n"
+                "👥 با پلن‌های چند اکانته می‌توانی چند سلف با یک اشتراک داشته باشی.\n"
+                "🔔 قبل از پایان دوره یادآوری می‌گیری — برای تمدید، دوباره پلن بخر.\n"
+                "📋 سفارش‌هایت همیشه در «🧾 سفارش‌ها» هست.\n\n"
+                "⚠️ رسید را فقط داخل همین ربات بفرست؛ به کسی خارج از ربات نده."
+            )
         if key == "after_run":
             return (
                 f"🚀 <b>سلف روی اکانتت فعال شد — حالا چه کنم؟</b>\n{L}\n"
@@ -3667,7 +3734,7 @@ class Manager:
         return s, True
 
     def tut_new_all_presets(self):
-        """هر سه متنِ آماده را یک‌جا می‌سازد (فقط آن‌هایی که هنوز نیستند)."""
+        """هر چهار متنِ آماده را یک‌جا می‌سازد (فقط آن‌هایی که هنوز نیستند)."""
         made = []
         for key, _ in self.TUT_PRESETS:
             s, created = self.tut_new_preset(key)
@@ -3799,6 +3866,54 @@ class Manager:
         except RuntimeError:
             return False
 
+    def tut_self_default_pending(self, uid):
+        """متن آماده‌ی «بعد از فعال‌سازی» وقتی باید برود که بخشِ after_run نباشد.
+
+        اگر مدیر بخشی با زمانِ «بعد از فعال‌سازی» ساخته باشد، همان بخش‌ها
+        (tut_schedule) مسئول‌اند و متن پیش‌فرض کنار می‌رود؛ وگرنه خودِ سلف
+        که فعال شد، آموزش خودکار می‌رود — یک‌بار برای هر کاربر.
+        """
+        for s in self.tut_sections():
+            if s["when"] == "after_run":
+                return False
+        return not self.db.tut_done(uid, self.TUT_SELF_DEF_ID)
+
+    async def tut_send_self_default(self, uid):
+        """«بعد از فعال‌سازی»ِ پیش‌فرض را می‌فرستد و یک‌بار ثبت می‌کند."""
+        lbl, cmd = self.TUT_MENU_FOOT["after_run"]
+        ok = await self.say(uid, self.tut_preset_text("after_run"),
+                            [[B(lbl, cmd, "success")], back_btn()],
+                            key="tut:self_def")
+        if ok:
+            self.db.tut_mark(uid, self.TUT_SELF_DEF_ID)
+            self.db.log(uid, "tut_sec", "default after_run")
+        return ok
+
+    def tut_schedule_self_default(self, uid, wait=0):
+        """اگر بخشی برای after_run نیست، متن پیش‌فرض «بعد از فعال‌سازی» را می‌فرستد.
+
+        ارسال خودکارِ آموزشِ سلف: به‌محض فعال‌شدن سلف، خودش می‌رود (بلاک نمی‌کند).
+        """
+        try:
+            if not self.tut_self_default_pending(uid):
+                return False
+        except Exception as e:
+            print("tut_self_def_chk:", type(e).__name__, e)
+            return False
+
+        async def _run():
+            try:
+                if wait and int(wait) > 0:
+                    await asyncio.sleep(int(wait))
+                await self.tut_send_self_default(uid)
+            except Exception as e:
+                print("tut_self_def:", type(e).__name__, e)
+        try:
+            asyncio.create_task(_run())
+            return True
+        except RuntimeError:
+            return False
+
     async def tut_send_menu(self, uid):
         """تگِ همه‌ی بخش‌های فعال را به کاربر نشان می‌دهد."""
         secs = self.tut_sections(on_only=True)
@@ -3838,7 +3953,7 @@ class Manager:
                          "success" if s["on"] else "primary")])
         missing = [k for k, _ in self.TUT_PRESETS if not self.tut_find_preset(k)]
         if missing:
-            kb.append([B("📝 متن‌های آماده (کیف پول / امتیاز / بعد از فعال‌سازی)",
+            kb.append([B("📝 متن‌های آماده (کیف پول / امتیاز / اشتراک / بعد از فعال‌سازی)",
                          "a:sec_tpl", "success")])
         kb.append([B("⚙️ ارسال خودکار بعد از فعال‌سازی", "a:tut_auto", "primary")])
         kb.append([B("📚 آموزش فعال‌سازی (اصلی)", "a:tut", "success")])
@@ -4066,6 +4181,15 @@ class Manager:
                     [back_btn("m:tut")])
             return
 
+        # دکمه‌ی «📚 آموزش …» آخرِ منوهای کیف پول / خرید امتیاز / اشتراک ماهانه:
+        # زدن دکمه = ارسال خودکارِ آموزشِ همان کار (تنظیم‌شدنی از پنلِ مدیر)
+        if data.startswith("tut:x:"):
+            key = data.split(":")[-1]
+            if key not in self.TUT_MENU_KEYS:
+                return await ans()
+            await ans("در حال ارسال…")
+            return await self.send_menu_tutorial(uid, key)
+
         if data == "m:status":
             await ans()
             c = self.db.get(uid)
@@ -4205,6 +4329,7 @@ class Manager:
             rows.append([B("✏️ مقدار دلخواه", "kc:0", "primary")])
             rows.append([B("💎 اشتراک ماهانه (بدون محدودیت)", "m:plans", "primary")])
             rows.append(back_btn())
+            rows.append([B("📚 آموزش خرید امتیاز", "tut:x:points", "success")])
             return await self.edit(ev, "\n".join(t), rows)
 
         if data.startswith("kp:"):
@@ -4409,6 +4534,9 @@ class Manager:
             if ok and act == "on" and self.cfg.get("tut_auto", True):
                 self.tut_schedule(uid, "after_run",
                                   wait=int(self.cfg.get("tut_auto_wait", 8) or 0))
+                # سلف فعال شد → آموزش خودکار می‌رود (متن پیش‌فرض اگر بخشی نیست)
+                self.tut_schedule_self_default(
+                    uid, wait=int(self.cfg.get("tut_auto_wait", 8) or 0))
             live = self.sup.is_running(uid)
             body = f"⚙️ <b>سرویس من</b>\n\n{('✅ ' if ok else '❌ ')}{msg}\n"
             if fee_msg and ok:
@@ -4455,6 +4583,7 @@ class Manager:
                            f"شروع می‌شود.</i>")
                 rows.append([B("🎯 خرید امتیاز به‌جای اشتراک", "m:packs", "success")])
             rows.append(back_btn())
+            rows.append([B("📚 آموزش اشتراک ماهانه", "tut:x:sub", "success")])
             return await self.edit(ev, "\n".join(txt), rows)
 
         if data.startswith("p:"):
@@ -4519,7 +4648,8 @@ class Manager:
                 [[B("➕  افزایش موجودی", "w:topup", "success")],
                  [B("💎 اشتراک", "m:plans", "primary"),
                   B("🎯 امتیاز", "m:packs", "primary")],
-                 back_btn()])
+                 back_btn(),
+                 [B("📚 آموزش شارژ کیف پول", "tut:x:wallet", "success")]])
 
         if data == "m:ref":
             await ans()
@@ -4784,11 +4914,14 @@ class Manager:
                 kb.append(back_btn("a:secs"))
                 return await self.edit(ev,
                     f"📝 <b>متن‌های آماده‌ی آموزش</b>\n{self.LINE}\n"
-                    "سه بخشِ آماده — با یک دکمه ساخته می‌شود؛ متن، زمان ارسال و "
+                    "چهار بخشِ آماده — با یک دکمه ساخته می‌شود؛ متن، زمان ارسال و "
                     "دکمه‌ی پایان از قبل تنظیم است:\n\n"
                     "💳 <b>کیف پول</b> — بعد از شارژ کیف پول (خودکار) · دکمه‌ی «💳 شارژ کیف پول»\n"
                     "🎯 <b>خرید امتیاز</b> — بعد از تأیید خرید امتیاز (خودکار) · دکمه‌ی «🎯 خرید امتیاز»\n"
+                    "💎 <b>اشتراک ماهانه</b> — بعد از تأیید اشتراک (خودکار) · دکمه‌ی «💎 اشتراک ماهانه»\n"
                     "🚀 <b>بعد از فعال‌سازی</b> — بعد از فعال‌شدن سلف (خودکار) · دکمه‌ی «⚙️ سرویس من»\n\n"
+                    "دکمه‌های «📚 آموزش …» آخرِ منوهای کیف پول / خرید امتیاز / اشتراک "
+                    "ماهانه هم همین متن‌ها را می‌فرستند.\n"
                     "اعدادِ متن (حداقل شارژ، امتیاز هر ساعت…) از تنظیماتِ فعلی پر می‌شود.\n"
                     "<i>بعد از ساختن، هر چیزی را می‌توانی از صفحه‌ی بخش عوض کنی.</i>",
                     kb)
