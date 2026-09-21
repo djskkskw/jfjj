@@ -3397,20 +3397,22 @@ class Manager:
     async def send_menu_tutorial(self, uid, key):
         """«📚 آموزش …» آخرِ منوهای کیف پول / خرید امتیاز / اشتراک ماهانه.
 
-        زدن دکمه = ارسال خودکارِ آموزشِ همان کار. محتوا قابل تنظیم است:
-        اگر مدیر برایش بخش ساخته/متن ثبت کرده (متن‌های آماده‌ی پنل) همان می‌رود؛
-        وگرنه متن آماده‌ی پیش‌فرض با دکمه‌ی همان کار — دکمه هیچ‌وقت خالی نیست.
+        زدن دکمه = ارسال خودکارِ آموزشِ همان کار با تحویلِ تمیز (bare=True):
+        فقط و فقط «محتوای ثبت‌شده‌ی مدیر» + «دکمه‌ی پایانِ همان کار» — بدون هیچ
+        متنِ اضافه‌ای بینشان: نه «متن پایان» (note) و نه تزریقِ متنِ آماده‌ی
+        پیش‌فرض وقتی مدیر پیام/محتوا ثبت کرده. اگر محتوایی ثبت نشده باشد
+        fallback: متن آماده‌ی پیش‌فرض + همان دکمه — دکمه هیچ‌وقت خالی نیست.
         """
         if key not in self.TUT_MENU_KEYS:
             return False
         sec = self.tut_find_preset(key)
         if sec and sec["on"]:
-            ok = await self.tut_send_section(uid, sec["id"], force=True)
+            ok = await self.tut_send_section(uid, sec["id"], force=True, bare=True)
             if ok:
                 return True
         lbl, cmd = self.TUT_MENU_FOOT[key]
         return await self.say(uid, self.tut_preset_text(key) or DEFAULT_TUTORIAL,
-                              [[B(lbl, cmd, "success")], back_btn()],
+                              [[B(lbl, cmd, "success")]],
                               key=f"tut:x:{key}")
 
     # ═══════════════════════════════════════════════
@@ -3767,11 +3769,19 @@ class Manager:
                 return []
         return [[B(label, cmd, "success")]]
 
-    async def tut_send_section(self, uid, sid, force=False, header=False):
+    async def tut_send_section(self, uid, sid, force=False, header=False, bare=False):
         """یک بخش را برای کاربر می‌فرستد: محتوا + (در آخر) دکمه‌ی پایان.
 
         force=True یعنی حتی اگر قبلاً رفته، دوباره برود (مثلاً کاربر خودش
         تگ را زده). با once=False همیشه می‌رود.
+
+        bare=True فقط برای دکمه‌های «📚 آموزش …» (tut:x:…) — تحویلِ تمیز:
+        فقط محتوای ثبت‌شده‌ی مدیر + دکمه‌ی پایانِ همان کار؛ نه «متن پایان»
+        (note)، نه تزریقِ متنِ آماده‌ی پیش‌فرض وقتی مدیر پیام/محتوا ثبت کرده.
+        دکمه به آخرین پیامِ محتوا می‌چسبد؛ اگر آخرین پیام آلبوم بود، یک پیامِ
+        بدون‌متن فقط با دکمه می‌رود. اگر محتوایی ثبت نشده باشد fallback:
+        متن آماده‌ی پیش‌فرض + همان دکمه. مسیرهای خودکار و تگ‌ها (bare=False)
+        با همان رفتار قبلی — از جمله متن پایان — دست‌نخورده می‌مانند.
         """
         s = self.tut_find(sid)
         if not s or not s["on"]:
@@ -3779,6 +3789,40 @@ class Manager:
         if s["once"] and not force and self.db.tut_done(uid, s["id"]):
             return False
         buttons = self.tut_btn_rows(s)
+        if bare and not buttons and s.get("preset") in dict(self.TUT_MENU_FOOT):
+            # دکمه‌ی پایانِ همان کار هیچ‌وقت خالی نیست
+            lbl, cmd = self.TUT_MENU_FOOT[s["preset"]]
+            buttons = [[B(lbl, cmd, "success")]]
+        if bare:
+            # فقط محتوای ثبت‌شده‌ی مدیر: پیام‌های ثبت‌شده + متنِ ذخیره‌شده
+            msgs = await self._tut_load(s["chat"], s["ids"])
+            body = (s.get("text") or "").strip()
+            if not msgs and not body:
+                # fallback: متن آماده‌ی پیش‌فرض + همان دکمه (بدون متن پایان)
+                body = self.tut_body_text(s)
+                if not body:
+                    return False
+                await self.say(uid, body, buttons, key=f"tut:body:{s['id']}")
+                self.db.tut_mark(uid, s["id"])
+                self.db.log(uid, "tut_sec", f"#{s['id']} {s['name']}")
+                return True
+            ok = 0
+            attached = False
+            if msgs:
+                ok, attached = await self._tut_copy(uid, msgs, s["chat"],
+                                                    buttons if not body else None)
+            if body:
+                await self.say(uid, body, buttons, key=f"tut:body:{s['id']}")
+                attached = bool(buttons)
+            if buttons and not attached:
+                # آخرین پیام آلبوم بوده (دکمه روی آلبوم نمی‌نشیند):
+                # یک پیامِ بدون‌متن فقط با دکمه
+                await self.say(uid, "\u2063", buttons, key=f"tut:btn:{s['id']}")
+            if not ok and not body:
+                return False
+            self.db.tut_mark(uid, s["id"])
+            self.db.log(uid, "tut_sec", f"#{s['id']} {s['name']}")
+            return True
         show_hdr = bool(header or s.get("header"))
         if show_hdr:
             allsec = self.tut_sections(on_only=True)
@@ -4328,8 +4372,8 @@ class Manager:
                       f"{money(self.cfg['point_price'])}"]
             rows.append([B("✏️ مقدار دلخواه", "kc:0", "primary")])
             rows.append([B("💎 اشتراک ماهانه (بدون محدودیت)", "m:plans", "primary")])
-            rows.append(back_btn())
             rows.append([B("📚 آموزش خرید امتیاز", "tut:x:points", "success")])
+            rows.append(back_btn())
             return await self.edit(ev, "\n".join(t), rows)
 
         if data.startswith("kp:"):
@@ -4582,8 +4626,8 @@ class Manager:
                 txt.append(f"<i>از {money(sh.packs()[0]['price']) if sh.packs() else ''} "
                            f"شروع می‌شود.</i>")
                 rows.append([B("🎯 خرید امتیاز به‌جای اشتراک", "m:packs", "success")])
-            rows.append(back_btn())
             rows.append([B("📚 آموزش اشتراک ماهانه", "tut:x:sub", "success")])
+            rows.append(back_btn())
             return await self.edit(ev, "\n".join(txt), rows)
 
         if data.startswith("p:"):
@@ -4648,8 +4692,8 @@ class Manager:
                 [[B("➕  افزایش موجودی", "w:topup", "success")],
                  [B("💎 اشتراک", "m:plans", "primary"),
                   B("🎯 امتیاز", "m:packs", "primary")],
-                 back_btn(),
-                 [B("📚 آموزش شارژ کیف پول", "tut:x:wallet", "success")]])
+                 [B("📚 آموزش شارژ کیف پول", "tut:x:wallet", "success")],
+                 back_btn()])
 
         if data == "m:ref":
             await ans()
