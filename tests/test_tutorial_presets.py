@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""سه متنِ آماده‌ی آموزش در پنل: کیف پول / خرید امتیاز / بعد از فعال‌سازی.
+"""چهار متنِ آماده‌ی آموزش در پنل: کیف پول / خرید امتیاز / اشتراک ماهانه / بعد از فعال‌سازی.
 
   1. پنل «🧩 بخش‌های آموزش» دکمه‌ی «📝 متن‌های آماده» دارد؛ هر کدام با یک
      دکمه به یک بخشِ کامل تبدیل می‌شود (متن + زمان ارسال + دکمه‌ی پایان).
@@ -281,10 +281,10 @@ INNER = textwrap.dedent('''
         m.bot = bot
         m.cfg["admin_ids"] = [ADMIN]
 
-        # ---------- 1) سه متن آماده: ساخت با یک دکمه ----------
+        # ---------- 1) چهار متن آماده: ساخت با یک دکمه ----------
         keys = [k for k, _ in M.Manager.TUT_PRESETS]
-        check(keys == ["wallet", "points", "after_run"],
-              "three presets: wallet / points / after_run")
+        check(keys == ["wallet", "points", "sub", "after_run"],
+              "four presets: wallet / points / sub / after_run")
         for k in keys:
             t = m.tut_preset_text(k)
             check(len(t) > 200 and "<b>" in t, f"preset text {k} is real HTML text")
@@ -303,8 +303,9 @@ INNER = textwrap.dedent('''
         await m.on_callback(ev)
         datas = btn_datas(ev.edits[-1][1])
         check("a:sec_tpl_one:wallet" in datas and "a:sec_tpl_one:points" in datas
+              and "a:sec_tpl_one:sub" in datas
               and "a:sec_tpl_one:after_run" in datas and "a:sec_tpl_all" in datas,
-              "presets page lists all three + build-all")
+              "presets page lists all four + build-all")
 
         ev = FakeCbEv(ADMIN, "a:sec_tpl_one:wallet")
         await m.on_callback(ev)
@@ -325,11 +326,14 @@ INNER = textwrap.dedent('''
         await m.on_callback(ev)
         p = m.tut_find_preset("points")
         r = m.tut_find_preset("after_run")
+        sb = m.tut_find_preset("sub")
         check(p and p["when"] == "after_points" and p["btn_cmd"] == "m:packs",
               "points preset: after_points + 🎯 خرید امتیاز button")
+        check(sb and sb["when"] == "after_sub" and sb["btn_cmd"] == "m:plans",
+              "sub preset: after_sub + 💎 اشتراک ماهانه button")
         check(r and r["when"] == "after_run" and r["btn_cmd"] == "m:svc",
               "after_run preset: after_run + ⚙️ سرویس من button")
-        check(len(m.tut_sections()) == 3, "build-all made exactly the missing two")
+        check(len(m.tut_sections()) == 4, "build-all made exactly the missing three")
 
         with open(M.CONFIG_FILE, encoding="utf-8") as f:
             saved = json.load(f)
@@ -340,7 +344,7 @@ INNER = textwrap.dedent('''
         ev = FakeCbEv(ADMIN, "a:secs")
         await m.on_callback(ev)
         check("a:sec_tpl" not in btn_datas(ev.edits[-1][1]),
-              "presets button hidden once all three exist")
+              "presets button hidden once all four exist")
         check("📝 متن" in ev.edits[-1][0], "sections list shows text-based content")
 
         # ---------- 2) تحویل به کاربر: متن + متن پایان + دکمه ----------
@@ -361,6 +365,8 @@ INNER = textwrap.dedent('''
               "after_wallet event fires the wallet preset")
         check([s["id"] for s in m.tut_pending_sections(USER, "after_points")] == [p["id"]],
               "after_points event fires the points preset")
+        check([s["id"] for s in m.tut_pending_sections(USER, "after_sub")] == [sb["id"]],
+              "after_sub event fires the subscription preset")
         check([s["id"] for s in m.tut_pending_sections(USER, "after_run")] == [r["id"]],
               "after_run event fires the after-activation preset")
         fake_now[0] += 5
@@ -485,7 +491,7 @@ def run_inner(port):
 
 
 if __name__ == "__main__":
-    print("--- سه متن آماده‌ی آموزش: کیف پول / خرید امتیاز / بعد از فعال‌سازی ---")
+    print("--- چهار متن آماده‌ی آموزش: کیف پول / خرید امتیاز / اشتراک ماهانه / بعد از فعال‌سازی ---")
     reset()
     out = run_inner(8173)
     checks = [ln for ln in out.splitlines() if ln.startswith("CHECK")]
