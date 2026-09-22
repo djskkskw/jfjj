@@ -520,9 +520,31 @@ x = eng.ex_cfg()
 eng.adaptive_on_flood(30, now=int(time.time()))   # +15 adaptive
 
 text = eng.exchange_text()
-check("دستور آماده برای کپی" in text, "exchange panel uses copy-ready menu style")
+check("صفحه‌ها" in text, "exchange panel is the compact pages layout")
+check("دستور آماده برای کپی" not in text,
+      "exchange panel is not the old crowded copy-ready wall")
 check("متن‌های تبادل" in text, "exchange panel links message-texts page")
 check("تبادل تنظیمات" in text, "exchange panel links settings page")
+check("تبادل راهنما" in text and "تبادل دستورها" in text,
+      "exchange panel links guide and commands pages")
+check("تشخیص هوشمند" in text and "بازگشت" in text,
+      "exchange panel shows smart-detect state and back hint")
+
+gtext = eng.exchange_cmd("راهنما")
+check("جوین خودکار" in gtext and "پیش‌قدم" in gtext
+      and "نگهبانی" in gtext and "تشخیص" in gtext,
+      "guide page explains the modes")
+
+ctext = eng.exchange_cmd("دستورها")
+check("تبادل پیش‌قدم" in ctext and "تبادل بررسی ۱۵ ۳۰" in ctext
+      and "تبادل گزارش لحظه‌ای" in ctext,
+      "commands page lists the exchange commands")
+
+sd_before = eng.ai.cfg["smart_detect"]
+eng.exchange_cmd("تشخیص")
+check(eng.ai.cfg["smart_detect"] == (not sd_before),
+      "تبادل تشخیص toggles smart detect")
+eng.exchange_cmd("تشخیص")   # برگرداندن به حالت قبل
 
 stext = eng.ex_settings_text()
 check("تبادل فاصله ۹۰ ۲۴۰" in stext, "settings page shows gap command")
