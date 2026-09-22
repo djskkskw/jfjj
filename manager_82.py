@@ -7698,20 +7698,123 @@ class Manager:
             return False, str(target)
 
     def _backup_fingerprint(self):
+        """اثرانگشت پشتیبان — همهٔ دادهٔ مهم (clients/* هم حساب می‌شود).
+        هر تغییری در مشتری‌ها/سشن‌ها باعث پشتیبان جدید می‌شود.
+        از mtime با دقت نانوثانیه + هش سریع برای فایل‌های کوچک استفاده می‌کند تا تغییر هم‌ثانیه هم شناخته شود."""
+        def _fp_one(path, rel=None):
+            try:
+                if not os.path.isfile(path):
+                    return (rel or path, None, None, None)
+                st = os.stat(path)
+                # نانوثانیه اگر FS پشتیبانی کند، وگرنه ثانیه *1e9
+                try:
+                    mtns = st.st_mtime_ns
+                except AttributeError:
+                    mtns = int(st.st_mtime * 1e9)
+                # برای فایل‌های کوچک (<8KB) یک هش سریع هم اضافه کن تا تغییر هم‌اندازه-هم‌زمان از دست نرود
+                h = None
+                try:
+                    if st.st_size < 8192:
+                        import hashlib
+                        with open(path, "rb") as f:
+                            h = hashlib.md5(f.read()).hexdigest()[:8]
+                except Exception:
+                    h = None
+                return (rel or path, st.st_size, mtns, h)
+            except Exception:
+                return (rel or path, None, None, None)
         fps = []
         for p in (DB_FILE, SHOP_DB, CONFIG_FILE, BOT_SESSION_FILE):
+            fps.append(_fp_one(p))
+        for p in (os.path.join(BASE_DIR, "jafj_ai.json"), os.path.join(BASE_DIR, ".jafj_deploy_id")):
+            fps.append(_fp_one(p))
+        if os.path.isdir(CLIENTS_DIR):
             try:
-                if os.path.isfile(p):
-                    st = os.stat(p)
-                    fps.append((p, st.st_size, int(st.st_mtime)))
-                else:
-                    fps.append((p, None, None))
+                for root, dirs, files in os.walk(CLIENTS_DIR):
+                    for fn in sorted(files):
+                        if fn.endswith("-wal") or fn.endswith("-shm") or fn.endswith("-journal"):
+                            continue
+                        fp = os.path.join(root, fn)
+                        rel = os.path.relpath(fp, BASE_DIR)
+                        fps.append(_fp_one(fp, rel))
             except Exception:
-                fps.append((p, None, None))
-        return tuple(fps)
+                pass
+        return tuple(sorted(fps))
+
+    def _save_local_backup_copy(self, src_zip):
+        """یک کپی از zip روی دیسک داده (Render Disk /data) هم نگه می‌دارد.
+        روی Railway/Render اگر Disk مانت باشد، این فایل بین دیپلوی‌ها می‌ماند؛
+        روی فریِ بدون Disk هم ضرری ندارد و برای تست/دیباگ مفید است.
+        حداکثر ۵ کپی گردشی + یک latest نگه می‌دارد.
+        علاوه بر zip، برای هر فایل اصلی یک .bak هم می‌سازد تا در ls باز باشد (درخواست کاربر Render)."""
+        try:
+            # کپی latest
+            latest = os.path.join(BASE_DIR, "jafj_backup_latest.zip")
+            try:
+                shutil.copy2(src_zip, latest)
+            except Exception as e:
+                print(f"  ⚠️ کپی پشتیبان local latest: {e}", flush=True)
+            # کپی گردشی با تاریخ
+            try:
+                bdir = os.path.join(BASE_DIR, "backups")
+                os.makedirs(bdir, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                dst = os.path.join(bdir, f"jafj_backup_{ts}.zip")
+                shutil.copy2(src_zip, dst)
+                # نگه‌دار فقط 5 تا آخر
+                try:
+                    files = sorted([os.path.join(bdir, f) for f in os.listdir(bdir) if f.startswith("jafj_backup_") and f.endswith(".zip")])
+                    while len(files) > 5:
+                        old = files.pop(0)
+                        try:
+                            os.remove(old)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"  ⚠️ کپی گردشی پشتیبان: {e}", flush=True)
+            # ── .bak تکی برای هر DB/کانفیگ (قابل دیدن با ls) ──
+            try:
+                for src in (DB_FILE, SHOP_DB, CONFIG_FILE, BOT_SESSION_FILE, os.path.join(BASE_DIR, "jafj_ai.json")):
+                    if not src or not os.path.isfile(src):
+                        continue
+                    try:
+                        # یک .bak ساده (آخرین) + یک چرخشی با timestamp داخل backups/
+                        bak_latest = src + ".bak"
+                        shutil.copy2(src, bak_latest)
+                        # چرخشی داخل backups/ با نام واضح
+                        try:
+                            bdir = os.path.join(BASE_DIR, "backups")
+                            os.makedirs(bdir, exist_ok=True)
+                            bn = os.path.basename(src)
+                            ts2 = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            bak_rot = os.path.join(bdir, f"{bn}.bak-{ts2}")
+                            shutil.copy2(src, bak_rot)
+                            # نگه‌دار فقط 3 نسخه از هر فایل
+                            try:
+                                pref = f"{bn}.bak-"
+                                cand = sorted([os.path.join(bdir, f) for f in os.listdir(bdir) if f.startswith(pref)])
+                                while len(cand) > 3:
+                                    old = cand.pop(0)
+                                    try:
+                                        os.remove(old)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        print(f"  ⚠️ .bak {src}: {e}", flush=True)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"  ⚠️ ذخیره پشتیبان محلی: {e}", flush=True)
 
     async def backup_once(self, force=False):
-        """یک پشتیبان zip بفرست (فقط اگر اثرانگشت عوض شده، مگر force)."""
+        """یک پشتیبان zip بساز و به تلگرام + دیسک بفرست.
+        اگر اثرانگشت عوض نشده و force نباشد، کاری نمی‌کند."""
         target = self._backup_target()
         if not target:
             return False, "BACKUP_CHAT تنظیم نشده"
@@ -7761,29 +7864,77 @@ class Manager:
         tmpzip = os.path.join(tempfile.gettempdir(), f"jafj_backup_{int(time.time())}_{os.getpid()}.zip")
         try:
             with zipfile.ZipFile(tmpzip, "w", zipfile.ZIP_DEFLATED) as z:
+                # فایل‌های اصلی
                 for src in (DB_FILE, SHOP_DB, CONFIG_FILE, BOT_SESSION_FILE):
                     if os.path.isfile(src):
                         z.write(src, arcname=os.path.basename(src))
                     else:
                         print(f"  ⚠️ پشتیبان: {src} نیست — رد شد", flush=True)
+                # jafj_ai و deploy_id
+                for extra in (os.path.join(BASE_DIR, "jafj_ai.json"), os.path.join(BASE_DIR, ".jafj_deploy_id")):
+                    if os.path.isfile(extra):
+                        z.write(extra, arcname=os.path.basename(extra))
+                # کل clients/ — هر مشتری: jafj.session, jafj_settings.json, limits, ...
+                if os.path.isdir(CLIENTS_DIR):
+                    for root, dirs, files in os.walk(CLIENTS_DIR):
+                        for fn in files:
+                            if fn.endswith("-wal") or fn.endswith("-shm") or fn.endswith("-journal") or fn.endswith(".restore_tmp"):
+                                continue
+                            fpath = os.path.join(root, fn)
+                            try:
+                                # لینک خراب را رد کن
+                                if not os.path.isfile(fpath):
+                                    continue
+                                arc = os.path.relpath(fpath, BASE_DIR)
+                                # فقط داخل clients/ را قبول کن
+                                if not arc.startswith("clients"+os.sep):
+                                    arc = os.path.join("clients", os.path.basename(fpath))
+                                z.write(fpath, arcname=arc)
+                            except Exception as e:
+                                print(f"  ⚠️ پشتیبان clients/{fn}: {e}", flush=True)
             try:
                 cnt = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
                 n = cnt["c"] if cnt else 0
             except Exception:
                 n = "?"
-            caption = f"{BACKUP_TAG} {datetime.now():%Y-%m-%d %H:%M} clients={n} build={BUILD_VERSION}"
-            await self.bot.send_file(target, tmpzip, caption=caption)
-            self._backup_fp = fp
+            # محاسبه حجم و تعداد فایل داخل zip برای کپشن
+            try:
+                with zipfile.ZipFile(tmpzip, "r") as zz:
+                    zcount = len(zz.namelist())
+            except Exception:
+                zcount = 0
             try:
                 sz = os.path.getsize(tmpzip)
             except Exception:
                 sz = 0
-            print(f"  📦 پشتیبان فرستاده شد به {target} ({sz} بایت)", flush=True)
+            # کپی محلی روی Disk قبل از ارسال تلگرام (اگر تلگرام fail هم شد، روی دیسک بماند)
+            try:
+                self._save_local_backup_copy(tmpzip)
+            except Exception as e:
+                print(f"  ⚠️ ذخیره محلی پشتیبان: {e}", flush=True)
+            caption = (f"{BACKUP_TAG} {datetime.now():%Y-%m-%d %H:%M} clients={n} files={zcount} "
+                       f"size={sz//1024}KB build={BUILD_VERSION} \u2502 "
+                       f"\U0001F4E6 پشتیبان کامل (DB+shop+clients) — پاک نکن؛ بعد از هر دیپلوی/ری‌استارت Render خودکار برمی‌گردد")
+            await self.bot.send_file(target, tmpzip, caption=caption)
+            # تایید متنی کوتاه در PV مدیر (غیر از فایل) — فقط در حالت دستی / موقع اولین بکاپ خودکار بعد از تغییری بزرگ
+            # از اسپم جلوگیری: فقط اگر force بود یا بیش از یک ساعت از آخرین تایید گذشته
+            try:
+                if force:
+                    kb = sz//1024
+                    await self.say(target, f"✅ <b>پشتیبان ذخیره شد</b>\n\n"
+                                           f"👥 {n} مشتری · 📦 {zcount} فایل · {kb}KB\n"
+                                           f"جای ذخیره: تلگرام (این چت) + <code>{os.path.join(BASE_DIR, 'jafj_backup_latest.zip')}</code>" + (f" + <code>{os.path.join(BASE_DIR, 'backups/')}</code>" if os.path.isdir(os.path.join(BASE_DIR, "backups")) else "") + "\n"
+                                           f"این پشتیبان شامل همه "
+                                           f"\u00ab<code>clients/</code>\u00bb (سشن و تنظیمات هر اکانت) هم هست و بعد از ری‌استارت Render خودکار بازیابی می‌شود.")
+            except Exception:
+                pass
+            self._backup_fp = fp
+            print(f"  📦 پشتیبان فرستاده شد به {target} ({sz} بایت, {zcount} فایل, {n} مشتری)", flush=True)
             try:
                 os.remove(tmpzip)
             except Exception:
                 pass
-            return True, f"پشتیبان فرستاده شد ({n} مشتری)"
+            return True, f"پشتیبان فرستاده شد ({n} مشتری, {zcount} فایل, {sz//1024}KB) — تلگرام + دیسک"
         except Exception as e:
             try:
                 if os.path.exists(tmpzip):
@@ -7791,10 +7942,22 @@ class Manager:
             except Exception:
                 pass
             print(f"  ⚠️ پشتیبان: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return False, f"{type(e).__name__}: {e}"
 
     async def backup_loop(self):
+        """حلقه پشتیبان خودکار — هر backup_interval() یکبار، بیدار و اثرانگشت را چک می‌کند.
+        روی Render رایگان پیش‌فرض ۱۲۰ثانیه است تا بین دو دیپلوی نهایت ۲ دقیقه داده از دست برود.
+        موفقیت/خطا در لاگ می‌ماند؛ پیام تلگرامیِ فایلِ پشتیبان خودش تایید است (اسپم متنی ندارد)."""
         await asyncio.sleep(10)
+        # یکبار در بوت با force=false تا اگر از اول داده دارد و فایل نداریم، سریع بکاپ بگیرد
+        try:
+            ok, msg = await self.backup_once(force=False)
+            if ok:
+                print(f"  📦 پشتیبان خودکار (اولین): {msg}", flush=True)
+        except Exception as e:
+            print(f"  ⚠️ پشتیبان اولیه: {type(e).__name__}: {e}", flush=True)
         while True:
             try:
                 interval = backup_interval()
@@ -7802,8 +7965,12 @@ class Manager:
                     ok, msg = await self.backup_once(force=False)
                     if ok:
                         print(f"  📦 پشتیبان خودکار: {msg}", flush=True)
+                    elif "بدون تغییر" not in msg:
+                        print(f"  ℹ️ پشتیبان خودکار: {msg}", flush=True)
                 except Exception as e:
                     print(f"  ⚠️ پشتیبان خودکار: {type(e).__name__}: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
@@ -7812,7 +7979,7 @@ class Manager:
                 await asyncio.sleep(120)
 
     async def restore_from_backup(self, force=False):
-        """بازیابی از آخرین پشتیبان تلگرام. (موفق, پیام)"""
+        """بازیابی از آخرین پشتیبان تلگرام (یا کپی محلی روی دیسک). (موفق, پیام)"""
         target = self._backup_target()
         if not target:
             return False, "BACKUP_CHAT تنظیم نشده"
@@ -7827,7 +7994,7 @@ class Manager:
             return False, f"دیتابیس خالی نیست ({n0} مشتری)"
         last = None
         try:
-            async for msg in self.bot.iter_messages(target, limit=50):
+            async for msg in self.bot.iter_messages(target, limit=200):
                 try:
                     txt = getattr(msg, "text", "") or ""
                 except Exception:
@@ -7846,7 +8013,145 @@ class Manager:
         except Exception as e:
             return False, f"خطا در جستجوی پشتیبان: {type(e).__name__}: {e}"
         if last is None:
-            return False, "پشتیبانی پیدا نشد"
+            # تلگرام چیزی نداشت — اگر کپی محلی روی Disk هست، همان را امتحان کن (برای Render Disk)
+            for cand in (os.path.join(BASE_DIR, "jafj_backup_latest.zip"), os.path.join(BASE_DIR, "backups", "jafj_backup_latest.zip")):
+                if os.path.isfile(cand):
+                    print(f"  ℹ️ پشتیبان تلگرام نبود؛ کپی محلی {cand} امتحان می‌شود", flush=True)
+                    try:
+                        # مستقیم به مرحله استخراج برو — کافیست zip_path را روی همان فایل بگذاریم
+                        # برای هماهنگی با کد پایین، یک tmp کپی می‌سازیم
+                        tmpzip2 = os.path.join(tempfile.gettempdir(), f"jafj_restore_local_{int(time.time())}_{os.getpid()}.zip")
+                        shutil.copy2(cand, tmpzip2)
+                        last = None  # علامت اینکه از local می‌آییم
+                        # ترفند: zip_path محلی را نگه دار و به بعد بپر — ساده: اینجا استخراج را صدا زده و برگردیم
+                        # ولی چون کد پایین انتظار دانلود از last را دارد، یک مسیر جدا باز می‌کنیم:
+                        zip_path = tmpzip2
+                        # —————————————— استخراج از کپی محلی ——————————————
+                        try:
+                            if hasattr(self.db, "close"):
+                                self.db.close()
+                            else:
+                                try:
+                                    self.db.c.commit()
+                                except Exception:
+                                    pass
+                                try:
+                                    self.db.c.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        try:
+                            if getattr(self, "shop", None) is not None:
+                                if hasattr(self.shop, "close"):
+                                    self.shop.close()
+                                else:
+                                    try:
+                                        self.shop.c.commit()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        self.shop.c.close()
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                        for suffix in ("-wal", "-shm", "-journal"):
+                            for base in (DB_FILE, SHOP_DB):
+                                try:
+                                    p = base + suffix
+                                    if os.path.exists(p):
+                                        os.remove(p)
+                                except Exception:
+                                    pass
+                        try:
+                            with zipfile.ZipFile(zip_path, "r") as z:
+                                names = z.namelist()
+                                for arc in names:
+                                    arc_norm = arc.replace("\\", "/")
+                                    if arc_norm.startswith("/") or ".." in arc_norm.split("/"):
+                                        continue
+                                    bn = os.path.basename(arc_norm)
+                                    if arc_norm.startswith("clients/"):
+                                        dest = os.path.join(BASE_DIR, arc_norm)
+                                    elif bn in ("manager.db", "shop.db", "manager_config.json", "manager_bot.string", "jafj_ai.json", ".jafj_deploy_id"):
+                                        dest = os.path.join(BASE_DIR, bn)
+                                    elif "/" in arc_norm and arc_norm.startswith("clients"):
+                                        dest = os.path.join(BASE_DIR, arc_norm)
+                                    else:
+                                        continue
+                                    try:
+                                        data = z.read(arc)
+                                    except Exception:
+                                        continue
+                                    ddir = os.path.dirname(dest)
+                                    if ddir and not os.path.isdir(ddir):
+                                        os.makedirs(ddir, exist_ok=True)
+                                    tmp = dest + ".restore_tmp"
+                                    with open(tmp, "wb") as f:
+                                        f.write(data)
+                                    os.replace(tmp, dest)
+                                    try:
+                                        os.chmod(dest, 0o600)
+                                    except Exception:
+                                        pass
+                        except Exception as e:
+                            try:
+                                self.db = DB()
+                                self.sup.db = self.db
+                            except Exception:
+                                pass
+                            try:
+                                self.shop = Shop()
+                            except Exception:
+                                pass
+                            return False, f"خطا در استخراج محلی: {type(e).__name__}: {e}"
+                        try:
+                            self.db = DB()
+                            self.sup.db = self.db
+                            self.shop = Shop()
+                        except Exception as e:
+                            return False, f"خطا در بازسازی دیتابیس: {e}"
+                        try:
+                            cnt2 = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
+                            n2 = cnt2["c"] if cnt2 else 0
+                        except Exception:
+                            n2 = -1
+                        regen = 0
+                        try:
+                            for cc in self.db.runnable():
+                                _uid = cc["uid"]
+                                _folder = self.sup.folder(_uid)
+                                _sess_path = os.path.join(_folder, "jafj.session")
+                                if not os.path.exists(_sess_path) and cc.get("session"):
+                                    try:
+                                        _plan = self.effective_plan(_uid)
+                                    except Exception:
+                                        _plan = None
+                                    _mx = 1
+                                    try:
+                                        if _plan:
+                                            _mx = max(1, int(_plan.get("max_accounts", 1) or 1))
+                                    except Exception:
+                                        pass
+                                    self.sup.prepare(_uid, cc["session"], cc.get("phone") or "", _mx, _plan)
+                                    regen += 1
+                        except Exception:
+                            pass
+                        try:
+                            if zip_path and zip_path.startswith(tempfile.gettempdir()) and os.path.exists(zip_path):
+                                os.remove(zip_path)
+                        except Exception:
+                            pass
+                        try:
+                            self._backup_fp = self._backup_fingerprint()
+                        except Exception:
+                            pass
+                        return True, f"بازیابی از دیسک محلی: {n2} مشتری" + (f" + {regen} سشن" if regen else "")
+                    except Exception as e:
+                        print(f"  ⚠️ restore local {cand}: {e}", flush=True)
+                        continue
+            return False, "پشتیبانی پیدا نشد (نه در تلگرام نه روی دیسک)"
         tmpzip = os.path.join(tempfile.gettempdir(), f"jafj_restore_{int(time.time())}_{os.getpid()}.zip")
         try:
             downloaded = None
@@ -7927,25 +8232,63 @@ class Manager:
             try:
                 with zipfile.ZipFile(zip_path, "r") as z:
                     names = z.namelist()
+                    # ایمن‌سازی: هیچ arc نباید از BASE_DIR بیرون برود
                     for arc in names:
-                        bn = os.path.basename(arc)
-                        if bn in ("manager.db", "shop.db", "manager_config.json", "manager_bot.string"):
-                            dest = os.path.join(BASE_DIR, bn)
-                            try:
-                                data = z.read(arc)
-                            except Exception as e:
-                                print(f"  ⚠️ خواندن {arc} از پشتیبان: {e}", flush=True)
+                        # نرمال‌سازی و جلوگیری از zip-slip
+                        try:
+                            # نگهداری فقط مسیرهای نسبی ایمن
+                            arc_norm = arc.replace("\\", "/")
+                            # اگر با / شروع شد یا شامل .. بود، رد کن
+                            if arc_norm.startswith("/") or ".." in arc_norm.split("/"):
+                                print(f"  ⚠️ فایل ناامن در پشتیبان: {arc} — رد شد", flush=True)
                                 continue
-                            try:
-                                tmp = dest + ".restore_tmp"
-                                with open(tmp, "wb") as f:
-                                    f.write(data)
-                                os.replace(tmp, dest)
-                                print(f"  ♻️ بازیابی {bn} ({len(data)} بایت)", flush=True)
-                            except Exception as e:
-                                print(f"  ⚠️ نوشتن {bn}: {e}", flush=True)
+                        except Exception:
+                            arc_norm = arc
+                        # فایل‌های تکی قدیمی (بدون پوشه) یا clients/... یا jafj_ai و...
+                        # سه دسته را پشتیبانی می‌کنیم:
+                        # 1) نام ساده: manager.db ...
+                        # 2) clients/<uid>/...
+                        # 3) jafj_ai.json / .jafj_deploy_id
+                        bn = os.path.basename(arc_norm)
+                        # تعیین مقصد
+                        if arc_norm.startswith("clients/"):
+                            dest = os.path.join(BASE_DIR, arc_norm)
+                        elif bn in ("manager.db", "shop.db", "manager_config.json", "manager_bot.string", "jafj_ai.json", ".jafj_deploy_id"):
+                            # پشتیبان قدیمی فقط basename دارد؛ پشتیبان جدید هم basename برای اینها
+                            dest = os.path.join(BASE_DIR, bn)
                         else:
-                            print(f"  ⚠️ فایل ناشناخته در پشتیبان: {arc} — رد شد", flush=True)
+                            # فایل ناشناخته داخل clients/... ممکن است با نام متفاوت باشد؛ اگر مسیر clients دارد بپذیر
+                            if "/" in arc_norm:
+                                # هرچیزی که زیر clients است حتی اگر قدیمی باشد
+                                if arc_norm.startswith("clients"):
+                                    dest = os.path.join(BASE_DIR, arc_norm)
+                                else:
+                                    print(f"  ⚠️ فایل ناشناخته در پشتیبان: {arc} — رد شد", flush=True)
+                                    continue
+                            else:
+                                print(f"  ⚠️ فایل ناشناخته در پشتیبان: {arc} — رد شد", flush=True)
+                                continue
+                        try:
+                            data = z.read(arc)
+                        except Exception as e:
+                            print(f"  ⚠️ خواندن {arc} از پشتیبان: {e}", flush=True)
+                            continue
+                        try:
+                            # پوشه مقصد را بساز (برای clients/123/...)
+                            ddir = os.path.dirname(dest)
+                            if ddir and not os.path.isdir(ddir):
+                                os.makedirs(ddir, exist_ok=True)
+                            tmp = dest + ".restore_tmp"
+                            with open(tmp, "wb") as f:
+                                f.write(data)
+                            os.replace(tmp, dest)
+                            try:
+                                os.chmod(dest, 0o600)
+                            except Exception:
+                                pass
+                            print(f"  ♻️ بازیابی {arc_norm} ({len(data)} بایت)", flush=True)
+                        except Exception as e:
+                            print(f"  ⚠️ نوشتن {bn}: {e}", flush=True)
             except Exception as e:
                 try:
                     self.db = DB()
