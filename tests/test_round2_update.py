@@ -520,10 +520,16 @@ x = eng.ex_cfg()
 eng.adaptive_on_flood(30, now=int(time.time()))   # +15 adaptive
 
 text = eng.exchange_text()
-check("فاصله موثر (تطبیقی)" in text, "exchange panel shows effective gap")
-check("چک عضویت:" in text, "exchange panel shows membership check line")
-check("ضد اسپم چندگروهی" in text, "exchange panel shows anti-spam line")
-check("فاصله Join پایه" in text, "exchange panel shows base gap")
+check("دستور آماده برای کپی" in text, "exchange panel uses copy-ready menu style")
+check("متن‌های تبادل" in text, "exchange panel links message-texts page")
+check("تبادل تنظیمات" in text, "exchange panel links settings page")
+
+stext = eng.ex_settings_text()
+check("تبادل فاصله ۹۰ ۲۴۰" in stext, "settings page shows gap command")
+check("فعلی: 15 تا 30 ثانیه" in stext, "settings page shows current check gap")
+check("تبادل بررسی ۱۵ ۳۰" in stext, "settings page shows membership check command")
+check("تبادل سقف ساعتی ۶۰" in stext, "settings page shows hour-cap command")
+check("↩️ بازگشت" in stext, "settings page has back hint")
 
 x["enabled"] = True
 panel = eng.panel()
