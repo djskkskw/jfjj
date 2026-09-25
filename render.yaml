@@ -28,6 +28,12 @@ services:
         sync: false
       - key: BACKUP_CHAT
         sync: false
+      # پشتیبان اطلاعات مشتری‌ها در گیت‌هاب (tools/gh_data_sync.py).
+      # TOKEN را در داشبورد رندر بگذار (sync: false = رندر آن را با دیپلوی پاک نمی‌کند)
+      - key: DATA_GITHUB_TOKEN
+        sync: false
+      - key: DATA_GITHUB_REPO
+        value: djskkskw/jfjj-data
     disk:
       name: jafj-data
       mountPath: /data

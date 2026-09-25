@@ -13,6 +13,7 @@ RUN mkdir -p /opt/jafj \
     && cp /app/manager_82.py /opt/jafj/manager_82.py \
     && cp /app/95.py /opt/jafj/95.py
 COPY railway-start.sh render-start.sh /opt/jafj/
+COPY tools/ /opt/jafj/tools/
 RUN chmod 755 /opt/jafj/railway-start.sh /opt/jafj/render-start.sh
 # Railway boots this by default; Render's blueprint (render.yaml) overrides the
 # start command with `sh /opt/jafj/render-start.sh`.
