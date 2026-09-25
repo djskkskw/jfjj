@@ -2529,6 +2529,7 @@ class Manager:
         self._backup_fp_loaded = False   # اثرانگشتِ خوانده‌شده از دیسک؟
         self._backup_msg_id = None       # آیدی «تک‌پیامِ» پشتیبان در پیوی
         self._backup_extra_cleaned = False  # پاک‌سازیِ یکباره‌ی پیام‌های اضافی قدیمی
+        self._restore_tries = 0          # چند تلاشِ بازیابی موقع بوت انجام شد
 
     # ---------- کمکی ----------
     def is_admin(self, uid):
@@ -7794,11 +7795,49 @@ class Manager:
         except Exception:
             pass
 
-    async def _find_last_backup_msg(self, target, limit=50):
+    @staticmethod
+    def _chat_key(x):
+        """کلیدِ مقایسه‌پذیر برای یک چت/مقصد (آیدی، username یا خود مقدار)."""
+        try:
+            if x is None:
+                return None
+            if isinstance(x, (int, str)):
+                return str(x).strip().lower().lstrip("@")
+            i = getattr(x, "id", None)
+            if i is not None:
+                return str(i)
+            u = getattr(x, "username", None)
+            if u:
+                return str(u).strip().lower().lstrip("@")
+        except Exception:
+            pass
+        return str(x)
+
+    @staticmethod
+    def _msg_has_media(m):
+        """پیام واقعاً فایل/مدیا دارد؟ (فایلِ zip همین است).
+
+        پیامِ «متنی» که فقط نشانهٔ JAFJBACKUP1 را نقل‌قول کرده (مثلاً مدیر
+        کپشن را فوروارد/کپی کرده باشد) هیچ zipی ندارد؛ اگر همان را به‌جای
+        پیامِ اصلی بگیریم، هم بازیابی شکست می‌خورد و هم پشتیبانِ بعدی روی
+        یک پیامِ بی‌فایل edit می‌شود."""
+        for attr in ("document", "photo", "media", "file"):
+            try:
+                if getattr(m, attr, None) is not None:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _find_last_backup_msg(self, target, limit=50, prefer_media=True):
         """تازه‌ترین پیامِ پشتیبانِ خودِ ربات در چت مقصد (یا None).
 
         برای «تک‌پیامِ پشتیبان»: همان پیام edit می‌شود، نه اینکه پیام تازه
-        انباشته شود. پیامِ چت‌های دیگر دست‌نخورده می‌ماند."""
+        انباشته شود. پیامِ چت‌های دیگر دست‌نخورده می‌ماند.
+
+        prefer_media=True → پیامی که واقعاً «فایل» دارد بر پیامِ متنیِ
+        نقل‌قولی مقدم است؛ اگر هیچ فایل‌داری نبود، همان تازه‌ترین پیامِ
+        نشانه‌دار برمی‌گردد (رفتار قدیمی)."""
         try:
             bot_id = 0
             try:
@@ -7806,6 +7845,7 @@ class Manager:
                 bot_id = getattr(me, "id", 0) or 0
             except Exception:
                 bot_id = 0
+            first_tagged = None
             async for m in self.bot.iter_messages(target, limit=limit):
                 try:
                     txt = (getattr(m, "text", "") or "") + " " + (getattr(m, "caption", "") or "")
@@ -7816,10 +7856,131 @@ class Manager:
                 sid = getattr(m, "sender_id", None)
                 if bot_id and sid and int(sid) != int(bot_id):
                     continue
-                return m
+                if first_tagged is None:
+                    first_tagged = m
+                if prefer_media and self._msg_has_media(m):
+                    return m
+            return first_tagged
         except Exception as e:
             print(f"  ⚠️ جستجوی پیام پشتیبان: {type(e).__name__}: {e}", flush=True)
         return None
+
+    async def _find_backup_anywhere(self, limit=40, skip=None, max_chats=12):
+        """جست‌وجوی سراسری: پیامِ پشتیبان در «همهٔ» چت‌های ربات → (مقصد, پیام).
+
+        بعد از دیپلوی/ری‌استارت ممکن است مقصدِ فعلی دیگر آن چتی نباشد که
+        پشتیبان در آن ساخته شده (BACKUP_CHAT عوض/حذف شده، یا admin_ids به
+        پیش‌فرضِ هاردکد برگشته و ربات هرگز آنجا پیام نداده). تک‌پیامِ پشتیبان
+        هنوز سر جایش است؛ این متد همان را پیدا می‌کند تا بازیابی و ادامهٔ
+        پشتیبان از دست نرود. اگر پیدا نشد (None, None)."""
+        ents = []
+        try:
+            dialogs = None
+            try:
+                dialogs = await self.bot.get_dialogs(limit=max_chats * 3)
+            except Exception:
+                dialogs = None
+            if dialogs:
+                for d in dialogs:
+                    e = getattr(d, "entity", None)
+                    if e is None:
+                        e = getattr(d, "id", None)
+                    if e is not None:
+                        ents.append(e)
+            else:
+                async for d in self.bot.iter_dialogs(limit=max_chats * 3):
+                    e = getattr(d, "entity", None)
+                    if e is None:
+                        e = getattr(d, "id", None)
+                    if e is not None:
+                        ents.append(e)
+        except Exception as e:
+            print(f"  ⚠️ فهرست چت‌ها برای جستجوی سراسری پشتیبان: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            return None, None
+        skip_key = self._chat_key(skip)
+        seen = set()
+        tried = 0
+        for ent in ents:
+            key = self._chat_key(ent)
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            if skip_key is not None and key == skip_key:
+                continue
+            if tried >= max_chats:
+                break
+            tried += 1
+            try:
+                msg = await self._find_last_backup_msg(ent, limit=limit, prefer_media=True)
+            except Exception as e:
+                print(f"  ⚠️ جستجوی پشتیبان در {key}: {type(e).__name__}", flush=True)
+                msg = None
+            if msg is not None:
+                print(f"  🔎 پیامِ پشتیبان در چت {key} پیدا شد "
+                      f"(id={getattr(msg, 'id', None)})", flush=True)
+                return ent, msg
+        return None, None
+
+    async def _backup_target_reachable(self, target):
+        """مقصدِ پشتیبان برای ربات قابل دسترسی است؟
+
+        بعد از دیپلوی ممکن است BACKUP_CHAT پاک شده و admin_ids به پیش‌فرضِ
+        هاردکد برگردد — آیدیِ کاربری که ربات هرگز با او گفت‌وگو نکرده
+        (PeerIdInvalid/CouldNotFindChat). در این حالت پشتیبان تا ابد شکست
+        می‌خورد، مگر اینکه از چتِ «پیامِ پشتیبانِ قبلی» ادامه بدهیم."""
+        if target is None or self.bot is None:
+            return False
+        try:
+            await self.bot.get_entity(target)
+            return True
+        except Exception as e:
+            print(f"  ⚠️ مقصدِ پشتیبان در دسترس نیست ({self._chat_key(target)}): "
+                  f"{type(e).__name__}", flush=True)
+            return False
+
+    # ── تازه‌سازی تنظیمات از دیسک بعد از بازیابی ──
+    def _reload_cfg_from_disk(self):
+        """cfg را از همان manager_config.json که همین الان بازیابی شد دوباره بخوان.
+
+        باگِ اصلیِ «بعد از دیپلوی همه‌ش می‌پره»: بازیابی، فایل تنظیمات را از
+        zip روی دیسک می‌نویسد، ولی self.cfg هنوز نسخهٔ حافظه است — یعنی همان
+        پیش‌فرض‌هایی که موقع بوت (با دیسکِ خالی) ساخته شد. اولین cfg.save()
+        بعد از بوت (و هر `self.cfg[...] = ...`) همان فایلِ بازیابی‌شده را با
+        پیش‌فرض بازنویسی می‌کند و همهٔ تنظیمات می‌پرد.
+
+        این متد همان کلیدها را از دیسکِ تازه می‌خواند و «درجا» در همین شیء
+        Config جایگذاری می‌کند (تا ارجاع‌های دیگر مثل self.sup.cfg هم همان
+        مقادیر تازه را ببینند). مقادیرِ محیطی (BOT_TOKEN/API_ID/API_HASH/
+        ADMIN_IDS) مثل همیشه اولویت دارند، چون Config() خودش آن‌ها را می‌خواند.
+        خروجی: True اگر از دیسک خوانده و جایگذاری شد."""
+        try:
+            if not os.path.isfile(CONFIG_FILE):
+                return False
+            fresh = Config()
+        except Exception as e:
+            print(f"  ⚠️ تازه‌سازی تنظیمات از دیسک: {type(e).__name__}: {e}", flush=True)
+            return False
+        try:
+            old = dict(getattr(self.cfg, "d", {}) or {})
+            new = dict(getattr(fresh, "d", {}) or {})
+            # کلیدهای غیرِپیش‌فرضی که فقط در حافظهٔ همین نشست هستند از دست نروند
+            for k, v in old.items():
+                if k not in DEFAULTS and k not in new:
+                    new[k] = v
+            self.cfg.d.clear()
+            self.cfg.d.update(new)
+            try:
+                self.sup.cfg = self.cfg
+            except Exception:
+                pass
+            changed = sum(1 for k, v in new.items() if old.get(k, "<none>") != v)
+            print(f"  ♻️ تنظیمات از دیسکِ بازیابی‌شده تازه شد "
+                  f"({changed} کلید عوض شد) — اولین save دیگر پاکش نمی‌کند", flush=True)
+            return True
+        except Exception as e:
+            print(f"  ⚠️ جایگزینی cfg از دیسک: {type(e).__name__}: {e}", flush=True)
+            return False
 
     async def _cleanup_extra_backup_msgs(self, target, keep_id=None, max_delete=10):
         """پیام‌های پشتیبانِ اضافیِ مانده از نسخه‌های قبل را پاک می‌کند.
@@ -7935,7 +8096,22 @@ class Manager:
         اگر اثرانگشت عوض نشده و force نباشد، کاری نمی‌کند."""
         target = self._backup_target()
         if not target:
-            return False, "BACKUP_CHAT تنظیم نشده"
+            # مقصد پیدا نشد (نه BACKUP_CHAT هست نه admin_ids). به‌جای تسلیم شدن
+            # — که یعنی پشتیبان تا ابد قطع می‌شود — چتِ همان «پیامِ پشتیبانِ
+            # قبلی» را سراسری پیدا کن و از همان ادامه بده.
+            fb_t, fb_m = None, None
+            if self.bot is not None:
+                try:
+                    fb_t, fb_m = await self._find_backup_anywhere(limit=40)
+                except Exception as e:
+                    print(f"  ⚠️ پیدا کردن مقصد از پیامِ قبلی: {type(e).__name__}: {e}",
+                          flush=True)
+            if fb_t is None:
+                return False, "BACKUP_CHAT تنظیم نشده"
+            target = fb_t
+            self._backup_msg_id = getattr(fb_m, "id", None)
+            print(f"  🔁 مقصدِ پشتیبان تنظیم نبود — از پیامِ پشتیبانِ قبلی در "
+                  f"{self._chat_key(target)} ادامه می‌دهیم", flush=True)
         if self.bot is None:
             return False, "ربات وصل نیست"
         try:
@@ -8045,6 +8221,27 @@ class Manager:
             # ممکن نبود (مثلاً ۴۸ ساعت از ارسالش گذشته باشد)، پیام تازه می‌رود و
             # قبلی درجا پاک می‌شود؛ نتیجه در هر دو حالت: فقط یک پیام پشتیبان.
             old_msg = await self._find_last_backup_msg(target)
+            if old_msg is None and not await self._backup_target_reachable(target):
+                # در این چت هیچ پیامِ پشتیبانی نیست و مقصد اصلاً برای ربات در
+                # دسترس هم نیست (بعد از دیپلوی admin_ids به پیش‌فرضِ هاردکد
+                # برمی‌گردد و ربات هرگز آنجا پیام نداده). قبل از شکستِ همیشگی،
+                # پیامِ پشتیبانِ قبلی را سراسری بگرد و از همان ادامه بده تا
+                # «تک‌پیامِ پشتیبان» گم نشود.
+                # نکته: اگر مقصد در دسترس باشد و فقط خالی باشد (مدیر عمداً
+                # BACKUP_CHAT را به چتِ تازه‌ای منتقل کرده)، پیامِ تازه همان‌جا
+                # ساخته می‌شود — یعنی انتقالِ عمدیِ مقصد هنوز کار می‌کند.
+                alt_t, alt_m = None, None
+                try:
+                    alt_t, alt_m = await self._find_backup_anywhere(limit=40, skip=target)
+                except Exception as e:
+                    print(f"  ⚠️ جستجوی سراسری برای ادامهٔ پشتیبان: "
+                          f"{type(e).__name__}: {e}", flush=True)
+                if alt_m is not None:
+                    print(f"  🔁 ادامهٔ پشتیبان از پیامِ قبلی در چت "
+                          f"{self._chat_key(alt_t)} (مقصد فعلی: "
+                          f"{self._chat_key(target)})", flush=True)
+                    target, old_msg = alt_t, alt_m
+                    self._backup_msg_id = getattr(alt_m, "id", None)
             sent = None
             if old_msg is not None:
                 try:
@@ -8157,26 +8354,35 @@ class Manager:
             n0 = 0
         if n0 != 0 and not force:
             return False, f"دیتابیس خالی نیست ({n0} مشتری)"
+        # ── پیدا کردنِ پیامِ پشتیبان ──
+        # اول در چتِ مقصد، با اولویتِ «فایل» بر متنِ نقل‌قولی (prefer_media):
+        # پیامِ متنی که فقط نشانهٔ JAFJBACKUP1 را دارد هیچ zipی ندارد و اگر
+        # همان انتخاب شود، بازیابی شکست می‌خورد.
         last = None
+        search_err = None
         try:
-            async for msg in self.bot.iter_messages(target, limit=200):
-                try:
-                    txt = getattr(msg, "text", "") or ""
-                except Exception:
-                    txt = ""
-                try:
-                    cap = getattr(msg, "caption", "") or ""
-                except Exception:
-                    cap = ""
-                try:
-                    combined = f"{txt} {cap}"
-                    if BACKUP_TAG in combined:
-                        last = msg
-                        break
-                except Exception:
-                    continue
+            last = await self._find_last_backup_msg(target, limit=200, prefer_media=True)
         except Exception as e:
-            return False, f"خطا در جستجوی پشتیبان: {type(e).__name__}: {e}"
+            search_err = f"{type(e).__name__}: {e}"
+        if last is None:
+            # چتِ مقصد چیزی نداشت (بعد از دیپلوی BACKUP_CHAT/admin_ids عوض یا
+            # پاک شده) → جست‌وجوی سراسری در همهٔ چت‌های ربات؛ تک‌پیامِ پشتیبان
+            # هر جا باشد پیدا می‌شود و بازیابی از دست نمی‌رود.
+            alt_target, alt_msg = None, None
+            try:
+                alt_target, alt_msg = await self._find_backup_anywhere(limit=100, skip=target)
+            except Exception as e:
+                print(f"  ⚠️ جست‌وجوی سراسری پشتیبان: {type(e).__name__}: {e}", flush=True)
+            if alt_msg is not None:
+                print(f"  🔁 پشتیبان در چتِ {self._chat_key(alt_target)} پیدا شد "
+                      f"(مقصدِ تنظیم‌شده: {self._chat_key(target)})", flush=True)
+                target, last = alt_target, alt_msg
+                try:
+                    self._backup_msg_id = getattr(last, "id", None)
+                except Exception:
+                    pass
+            elif search_err:
+                return False, f"خطا در جستجوی پشتیبان: {search_err}"
         if last is None:
             # تلگرام چیزی نداشت — اگر کپی محلی روی Disk هست، همان را امتحان کن (برای Render Disk)
             for cand in (os.path.join(BASE_DIR, "jafj_backup_latest.zip"), os.path.join(BASE_DIR, "backups", "jafj_backup_latest.zip")):
@@ -8312,6 +8518,12 @@ class Manager:
                             self._save_backup_fp(self._backup_fingerprint())
                         except Exception:
                             pass
+                        # تنظیمات از دیسکِ بازیابی‌شده تازه شود (مثل مسیر تلگرام)
+                        try:
+                            self._reload_cfg_from_disk()
+                        except Exception as e:
+                            print(f"  ⚠️ تازه‌سازی تنظیمات بعد از بازیابی محلی: "
+                                  f"{type(e).__name__}", flush=True)
                         return True, f"بازیابی از دیسک محلی: {n2} مشتری" + (f" + {regen} سشن" if regen else "")
                     except Exception as e:
                         print(f"  ⚠️ restore local {cand}: {e}", flush=True)
@@ -8511,6 +8723,14 @@ class Manager:
                 self._save_backup_fp(self._backup_fingerprint())
             except Exception:
                 pass
+            # ── تنظیمات را از دیسکِ بازیابی‌شده تازه کن ──
+            # وگرنه اولین cfg.save() بعد از بوت، manager_config.jsonِ
+            # بازیابی‌شده را با پیش‌فرض‌های حافظه بازنویسی می‌کند
+            # (باگِ اصلیِ «بعد از دیپلوی همه‌ش می‌پره»).
+            try:
+                self._reload_cfg_from_disk()
+            except Exception as e:
+                print(f"  ⚠️ تازه‌سازی تنظیمات بعد از بازیابی: {type(e).__name__}", flush=True)
             return True, f"بازیابی شد: {n2} مشتری" + (f" + {regen} سشن بازسازی" if regen else "")
         except Exception as e:
             try:
@@ -8543,6 +8763,82 @@ class Manager:
             import traceback
             traceback.print_exc()
             return False, f"خطا: {type(e).__name__}: {e}"
+
+    async def startup_restore(self, notify=True, retries=1, wait_sec=20):
+        """بازیابیِ موقعِ بوت: یک تلاشِ دوباره + پیامِ وضعیت در پیوی مدیر.
+
+        چرا تلاشِ دوباره؟ موقع بوتِ بعد از دیپلوی، تلگرام/شبکه ممکن است چند
+        ثانیه آماده نباشد؛ یک بار شکست نباید یعنی «همهٔ داده‌ها رفت».
+        چرا پیامِ وضعیت؟ تا مدیر بداند بازیابی شد یا نه — سکوت همان چیزی است
+        که باعث می‌شود فکر کند «همه‌ش می‌پره».
+
+        اگر دیتابیس از قبل پر باشد هیچ کاری نمی‌کند (و پیامی هم نمی‌فرستد تا
+        بعد از هر ری‌استارتِ عادی پیوی مدیر شلوغ نشود). خروجی: (موفق, پیام)."""
+        if not backup_target_raw():
+            return False, "BACKUP_CHAT تنظیم نشده"
+
+        def _count():
+            try:
+                r = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
+                return r["c"] if r else 0
+            except Exception:
+                return 0
+
+        n0 = _count()
+        if n0 != 0:
+            print(f"  ℹ️ {n0} مشتری در دیتابیس — نیازی به بازیابی نیست", flush=True)
+            return True, f"{n0} مشتری در دیتابیس — نیازی به بازیابی نبود"
+
+        tries = max(1, int(retries) + 1)
+        ok, msg = False, "بازیابی انجام نشد"
+        print("  🔍 دیتابیس خالی است — جستجوی پشتیبان تلگرام…", flush=True)
+        for i in range(tries):
+            try:
+                ok, msg = await self.restore_from_backup(force=False)
+            except Exception as e:
+                ok, msg = False, f"{type(e).__name__}: {e}"
+            self._restore_tries = i + 1
+            print(f"  {'✅' if ok else 'ℹ️'} بازیابی (تلاش {i + 1}/{tries}): {msg}",
+                  flush=True)
+            if ok:
+                break
+            if i + 1 < tries:
+                # یک مکث کوتاه و تلاشِ دوباره
+                try:
+                    await asyncio.sleep(max(0, int(wait_sec)))
+                except Exception:
+                    pass
+        # حتی اگر بازیابیِ تلگرامی نشد، تنظیماتِ روی دیسک (کپیِ محلی یا دستی)
+        # باید در حافظه تازه شود تا اولین cfg.save() پاکش نکند.
+        try:
+            self._reload_cfg_from_disk()
+        except Exception:
+            pass
+        n2 = _count()
+        if notify:
+            if ok:
+                status = ("✅ <b>بازیابیِ اطلاعات بعد از دیپلوی انجام شد</b>\n\n"
+                          f"{msg}\n👥 {n2} مشتری در دیتابیس\n"
+                          "⚙️ تنظیمات هم از همان پشتیبان تازه شد — چیزی نپَریده.\n"
+                          "<i>بازیابیِ دستی: <code>.restore</code></i>")
+            else:
+                status = ("⚠️ <b>بازیابیِ اطلاعات ناموفق بود</b>\n\n"
+                          f"{msg}\n\nدیتابیس خالی است و پشتیبانی پیدا نشد.\n"
+                          f"• چتِ پشتیبان: <code>{backup_target_raw()}</code>\n"
+                          "• اگر تک‌پیامِ فایلِ پشتیبان را پاک کرده‌ای، همان zip را "
+                          "دوباره در این چت بفرست.\n"
+                          "• بعد از رفع، <code>.restore</code> را بفرست.")
+            sent_any = False
+            for a in (self.cfg.get("admin_ids") or []):
+                try:
+                    if await self.say(a, status, key="startup_restore"):
+                        sent_any = True
+                except Exception as e:
+                    print(f"  ⚠️ پیامِ وضعیتِ بازیابی: {type(e).__name__}", flush=True)
+            if not sent_any:
+                print("  ℹ️ پیامِ وضعیتِ بازیابی به پیوی مدیر نرسید "
+                      "(مدیری ثبت نشده)", flush=True)
+        return ok, msg
 
 
     # ═══════════════════════════════════════════════
@@ -8653,19 +8949,9 @@ class Manager:
         # مقصد از backup_target_raw() خوانده می‌شود که بدون BACKUP_CHAT هم
         # به «admin» برمی‌گردد، پس بعد از هر دیپلوی/ری‌استارت که دیتابیس
         # پاک شده باشد، بازیابی خودکار انجام می‌شود.
+        # startup_restore: بازیابی + یک تلاشِ دوباره + پیامِ وضعیت در پیوی مدیر
         try:
-            if backup_target_raw():
-                try:
-                    _cnt0 = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
-                    _n0 = _cnt0["c"] if _cnt0 else 0
-                except Exception:
-                    _n0 = 0
-                if _n0 == 0:
-                    print("  🔍 دیتابیس خالی است — جستجوی پشتیبان تلگرام…", flush=True)
-                    _ok, _msg = await self.restore_from_backup(force=False)
-                    print(f"  {'✅' if _ok else 'ℹ️'} بازیابی: {_msg}", flush=True)
-                else:
-                    print(f"  ℹ️ {_n0} مشتری در دیتابیس — نیازی به بازیابی نیست", flush=True)
+            await self.startup_restore()
         except Exception as e:
             print(f"  ⚠️ بازیابی خودکار: {type(e).__name__}: {e}", flush=True)
 
