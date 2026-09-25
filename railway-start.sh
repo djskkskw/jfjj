@@ -107,6 +107,35 @@ fi
 
 log "code=$IMAGE_DIR data=$DATA_DIR python=$PY self=$([ -s "$SELF" ] && echo ok || echo MISSING)"
 
+# ── 2.5) GitHub data sync: اطلاعات مشتری‌ها از/به گیت‌هاب ────────────────────
+# اگر DATA_GITHUB_TOKEN تنظیم نشده باشد، هیچ اتفاقی نمی‌افتد (اختیاری است).
+SYNC="$IMAGE_DIR/tools/gh_data_sync.py"
+SYNC_PID=0
+stop_sync() {
+    if [ "$SYNC_PID" -gt 0 ]; then
+        kill -TERM "$SYNC_PID" 2>/dev/null || true
+        _i=0
+        while [ "$_i" -lt 5 ] && kill -0 "$SYNC_PID" 2>/dev/null; do
+            sleep 1
+            _i=$((_i + 1))
+        done
+        kill -KILL "$SYNC_PID" 2>/dev/null || true
+        SYNC_PID=0
+    fi
+}
+if [ -n "${DATA_GITHUB_TOKEN:-}" ] && [ -f "$SYNC" ]; then
+    # قبل از بوت: اطلاعات را از ریپوی گیت‌هاب برگردان (دیپلوی → wipe → بازیابی)
+    if "$PY" "$SYNC" pull; then
+        log "gh_data_sync: بازیابی از گیت‌هاب انجام شد"
+    else
+        log "WARNING: gh_data_sync pull ناموفق بود — با داده‌های فعلی ادامه می‌دهیم"
+    fi
+    # ذخیره‌ی دوره‌ای + ذخیره‌ی پایانی هنگام خاموشی
+    "$PY" "$SYNC" loop &
+    SYNC_PID=$!
+    log "gh_data_sync: ذخیره‌ی دوره‌یی شروع شد (pid=$SYNC_PID)"
+fi
+
 # ── 3) run it ───────────────────────────────────────────────────────────────
 if [ "${JAFJ_SUPERVISE:-1}" = "0" ]; then
     cd "$DATA_DIR" 2>/dev/null || true
@@ -145,10 +174,12 @@ while :; do
     CHILD=0
 
     if [ "$STOPPING" = 1 ]; then
+        stop_sync
         exit "$code"
     fi
     if [ "$code" = 0 ]; then
         log "manager exited cleanly"
+        stop_sync
         exit 0
     fi
 
@@ -160,6 +191,7 @@ while :; do
     fi
     if [ "$crashes" -ge "$MAX_CRASHES" ]; then
         log "manager crashed $crashes times in a row — giving up so Railway reports it"
+        stop_sync
         exit "$code"
     fi
     nap=$(( NAP_BASE * (crashes + 1) ))
