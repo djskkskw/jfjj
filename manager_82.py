@@ -2526,6 +2526,9 @@ class Manager:
         self.bot = None
         self._join_ok = {}       # uid -> expire ts cache
         self._say_last = {}      # کش ضد تکرار say (روی self نه روی bound method)
+        self._backup_fp_loaded = False   # اثرانگشتِ خوانده‌شده از دیسک؟
+        self._backup_msg_id = None       # آیدی «تک‌پیامِ» پشتیبان در پیوی
+        self._backup_extra_cleaned = False  # پاک‌سازیِ یکباره‌ی پیام‌های اضافی قدیمی
 
     # ---------- کمکی ----------
     def is_admin(self, uid):
@@ -7218,8 +7221,11 @@ class Manager:
                         except Exception:
                             ets = b["ts"]
                         parsed.append({"text": txt, "edit_ts": ets})
-                        # ضربانِ مرده‌ی خودمان (از ری‌استارت قبل) را پاک کن
-                        if b["dep"] == DEPLOY_ID and int(time.time()) - ets > 1800:
+                        # ضربانِ مرده (خودی یا غریبه — مانده از دیپلوی/ری‌استارت
+                        # قبل) را پاک کن؛ ضربانِ زنده هر ۶۰ثانیه edit می‌شود و
+                        # هرگز این‌قدر کهنه نمی‌ماند. این‌طور پیوی مدیر با
+                        # ضربانِ هر دیپلوی شلوغ نمی‌شود.
+                        if int(time.time()) - ets > 1800:
                             stale_own.append(m)
                     for m in stale_own:
                         try:
@@ -7235,7 +7241,22 @@ class Manager:
                     existing = None
                     for m in msgs:
                         b = parse_beacon(getattr(m, "message", "") or "")
-                        if b and b["dep"] == DEPLOY_ID:
+                        if not b:
+                            continue
+                        if b["dep"] == DEPLOY_ID:
+                            existing = m
+                            break
+                        # پیامِ ضربانِ «مرده‌ی» یک نمونه‌ی دیگر (کهنه، نه زنده)
+                        # بازیافت می‌شود تا هر دیپلوی/ری‌استارت یک پیامِ تازه در
+                        # پیوی مدیر نگذارد. ضربانِ زنده‌ی نمونه‌ی دیگر (تازه‌تر
+                        # از ۱۸۰ثانیه) هرگز دست‌نخورده می‌ماند و مانده‌های
+                        # بالای ۱۸۰۰ثانیه هم در حلقه‌ی بالا پاک می‌شوند.
+                        try:
+                            ets2 = int((m.edit_date or m.date).timestamp())
+                        except Exception:
+                            ets2 = b["ts"]
+                        _age2 = int(time.time()) - ets2
+                        if 180 < _age2 <= 1800:
                             existing = m
                             break
                     try:
@@ -7741,6 +7762,103 @@ class Manager:
                 pass
         return tuple(sorted(fps))
 
+    # ── «یک پیامِ پشتیبان» — پیام پشتیبان همیشه همان یکی است و به‌روز می‌شود ──
+    # قبلاً هر تغییر داده و هر ری‌استارت/دیپلوی یک پیامِ پشتیبانِ تازه در پیوی
+    # مدیر می‌گذاشت و پیوی پر از فایل می‌شد. الان: پیام قبلی پیدا می‌شود، مدیای
+    # همان پیام عوض می‌شود (edit) و بعد از هر ری‌استارتِ بی‌تغییر هم هیچ پیام
+    # تازه‌ای نمی‌رود. فقط و فقط «یک» پیام پشتیبان در چت می‌ماند.
+    def _backup_fp_path(self):
+        return os.path.join(BASE_DIR, ".jafj_backup_fp")
+
+    def _save_backup_fp(self, fp):
+        """اثرانگشت آخرین پشتیبان را در حافظه + فایل داده ذخیره کن؛ تا بعد از
+        ری‌استارتِ بدون تغییرِ داده، پشتیبانِ تکراری به پیوی مدیر نرود."""
+        self._backup_fp = fp
+        try:
+            import json as _json
+            with open(self._backup_fp_path(), "w", encoding="utf-8") as f:
+                _json.dump([list(x) for x in (fp or ())], f)
+        except Exception:
+            pass
+
+    def _load_backup_fp(self):
+        """فقط یکبار در هر پروسه: اثرانگشتِ ذخیره‌شده از بوتِ قبل را بخوان."""
+        if getattr(self, "_backup_fp_loaded", False):
+            return
+        self._backup_fp_loaded = True
+        try:
+            import json as _json
+            with open(self._backup_fp_path(), encoding="utf-8") as f:
+                data = _json.load(f)
+            self._backup_fp = tuple(tuple(x) for x in (data or []))
+        except Exception:
+            pass
+
+    async def _find_last_backup_msg(self, target, limit=50):
+        """تازه‌ترین پیامِ پشتیبانِ خودِ ربات در چت مقصد (یا None).
+
+        برای «تک‌پیامِ پشتیبان»: همان پیام edit می‌شود، نه اینکه پیام تازه
+        انباشته شود. پیامِ چت‌های دیگر دست‌نخورده می‌ماند."""
+        try:
+            bot_id = 0
+            try:
+                me = await self.bot.get_me()
+                bot_id = getattr(me, "id", 0) or 0
+            except Exception:
+                bot_id = 0
+            async for m in self.bot.iter_messages(target, limit=limit):
+                try:
+                    txt = (getattr(m, "text", "") or "") + " " + (getattr(m, "caption", "") or "")
+                except Exception:
+                    continue
+                if BACKUP_TAG not in txt:
+                    continue
+                sid = getattr(m, "sender_id", None)
+                if bot_id and sid and int(sid) != int(bot_id):
+                    continue
+                return m
+        except Exception as e:
+            print(f"  ⚠️ جستجوی پیام پشتیبان: {type(e).__name__}: {e}", flush=True)
+        return None
+
+    async def _cleanup_extra_backup_msgs(self, target, keep_id=None, max_delete=10):
+        """پیام‌های پشتیبانِ اضافیِ مانده از نسخه‌های قبل را پاک می‌کند.
+
+        قبلاً هر پشتیبان یک پیامِ تازه بود و در پیوی مدیر انباشته می‌شد؛ این
+        توده‌ی قدیمی تدریجی و با سقف (max_delete در هر صدا) پاک می‌شود تا در
+        چت فقط «یک» پیام پشتیبان بماند. پشتیبانِ چت‌های دیگر دست نمی‌خورد."""
+        try:
+            bot_id = 0
+            try:
+                me = await self.bot.get_me()
+                bot_id = getattr(me, "id", 0) or 0
+            except Exception:
+                bot_id = 0
+            deleted = 0
+            async for m in self.bot.iter_messages(target, limit=100):
+                if deleted >= max_delete:
+                    break
+                try:
+                    txt = (getattr(m, "text", "") or "") + " " + (getattr(m, "caption", "") or "")
+                except Exception:
+                    continue
+                if BACKUP_TAG not in txt:
+                    continue
+                if keep_id is not None and getattr(m, "id", None) == keep_id:
+                    continue
+                sid = getattr(m, "sender_id", None)
+                if bot_id and sid and int(sid) != int(bot_id):
+                    continue
+                try:
+                    await self.bot.delete_messages(target, [getattr(m, "id", None)])
+                    deleted += 1
+                except Exception:
+                    continue
+            if deleted:
+                print(f"  🧹 {deleted} پیام پشتیبانِ اضافی پاک شد — فقط یک پشتیبان در چت می‌ماند", flush=True)
+        except Exception as e:
+            print(f"  ⚠️ پاک‌سازی پیام‌های اضافی پشتیبان: {type(e).__name__}", flush=True)
+
     def _save_local_backup_copy(self, src_zip):
         """یک کپی از zip روی دیسک داده (Render Disk /data) هم نگه می‌دارد.
         روی Railway/Render اگر Disk مانت باشد، این فایل بین دیپلوی‌ها می‌ماند؛
@@ -7834,8 +7952,14 @@ class Manager:
         except Exception as e:
             print(f"  ⚠️ بررسی عمومی/خصوصی: {e}", flush=True)
         fp = self._backup_fingerprint()
-        if not force and getattr(self, "_backup_fp", None) == fp:
-            return False, "بدون تغییر"
+        if not force:
+            self._load_backup_fp()
+            if getattr(self, "_backup_fp", None) == fp:
+                # داده‌ها از آخرین پشتیبان عوض نشده — ولی فقط وقتی «هیچ کاری
+                # نکن» که پیامِ پشتیبان هنوز در چت هست؛ اگر مدیر آن تک‌پیام را
+                # پاک کرده باشد، همین‌جا دوباره ساخته می‌شود.
+                if await self._find_last_backup_msg(target, limit=100) is not None:
+                    return False, "بدون تغییر"
         # چک‌پوینت WAL تا کپی db کامل باشد
         try:
             if getattr(self, "db", None) is not None:
@@ -7914,8 +8038,36 @@ class Manager:
                 print(f"  ⚠️ ذخیره محلی پشتیبان: {e}", flush=True)
             caption = (f"{BACKUP_TAG} {datetime.now():%Y-%m-%d %H:%M} clients={n} files={zcount} "
                        f"size={sz//1024}KB build={BUILD_VERSION} \u2502 "
-                       f"\U0001F4E6 پشتیبان کامل (DB+shop+clients) — پاک نکن؛ بعد از هر دیپلوی/ری‌استارت Render خودکار برمی‌گردد")
-            await self.bot.send_file(target, tmpzip, caption=caption)
+                       f"\U0001F4E6 پشتیبان کامل (DB+shop+clients) — همین «یک» پیام همیشه با آخرین نسخه به‌روز می‌شود؛ پاکش نکن؛ بعد از هر دیپلوی/ری‌استارت Render خودکار برمی‌گردد")
+            # ── فقط «یک» پیامِ پشتیبان در این چت بماند ──
+            # پیام پشتیبان قبلی پیدا می‌شود؛ اگر بود، مدیای «همان» پیام با zip
+            # تازه عوض می‌شود (edit) — پیام جدیدی به پیوی اضافه نمی‌شود. اگر edit
+            # ممکن نبود (مثلاً ۴۸ ساعت از ارسالش گذشته باشد)، پیام تازه می‌رود و
+            # قبلی درجا پاک می‌شود؛ نتیجه در هر دو حالت: فقط یک پیام پشتیبان.
+            old_msg = await self._find_last_backup_msg(target)
+            sent = None
+            if old_msg is not None:
+                try:
+                    sent = await self.bot.edit_message(
+                        target, getattr(old_msg, "id", None), caption,
+                        file=tmpzip, force_document=True)
+                except Exception as e:
+                    print(f"  ℹ️ به‌روزرسانیِ همان پیام پشتیبان ممکن نشد "
+                          f"({type(e).__name__}) — پیام تازه جایگزین قبلی می‌شود", flush=True)
+                    sent = None
+            if sent is None:
+                # اول تازه را بفرست، بعد قبلی را پاک کن — تا بین این دو، همیشه
+                # یک پشتیبانِ معتبر در چت موجود باشد.
+                sent = await self.bot.send_file(target, tmpzip, caption=caption)
+                if old_msg is not None:
+                    try:
+                        await self.bot.delete_messages(target, [getattr(old_msg, "id", None)])
+                    except Exception:
+                        pass
+            try:
+                self._backup_msg_id = getattr(sent, "id", None) or getattr(old_msg, "id", None)
+            except Exception:
+                self._backup_msg_id = None
             # تایید متنی کوتاه در PV مدیر (غیر از فایل) — فقط در حالت دستی / موقع اولین بکاپ خودکار بعد از تغییری بزرگ
             # از اسپم جلوگیری: فقط اگر force بود یا بیش از یک ساعت از آخرین تایید گذشته
             try:
@@ -7928,7 +8080,7 @@ class Manager:
                                            f"\u00ab<code>clients/</code>\u00bb (سشن و تنظیمات هر اکانت) هم هست و بعد از ری‌استارت Render خودکار بازیابی می‌شود.")
             except Exception:
                 pass
-            self._backup_fp = fp
+            self._save_backup_fp(fp)
             print(f"  📦 پشتیبان فرستاده شد به {target} ({sz} بایت, {zcount} فایل, {n} مشتری)", flush=True)
             try:
                 os.remove(tmpzip)
@@ -7951,6 +8103,19 @@ class Manager:
         روی Render رایگان پیش‌فرض ۱۲۰ثانیه است تا بین دو دیپلوی نهایت ۲ دقیقه داده از دست برود.
         موفقیت/خطا در لاگ می‌ماند؛ پیام تلگرامیِ فایلِ پشتیبان خودش تایید است (اسپم متنی ندارد)."""
         await asyncio.sleep(10)
+        # پاک‌سازیِ یکباره‌ی پیام‌های پشتیبانِ اضافیِ مانده از نسخه‌های قبل —
+        # قبلاً هر پشتیبان یک پیامِ تازه در پیوی مدیر می‌گذاشت و انباشته می‌شد.
+        # حالا به‌جز «تک‌پیامِ» پشتیبان، بقیه با سقفِ محدود پاک می‌شوند.
+        try:
+            if not getattr(self, "_backup_extra_cleaned", False):
+                self._backup_extra_cleaned = True
+                _t = self._backup_target()
+                if _t and self.bot is not None:
+                    _keep = await self._find_last_backup_msg(_t, limit=100)
+                    _kid = getattr(_keep, "id", None) if _keep is not None else None
+                    await self._cleanup_extra_backup_msgs(_t, keep_id=_kid)
+        except Exception as e:
+            print(f"  ⚠️ پاک‌سازی پشتیبان‌های اضافی: {type(e).__name__}", flush=True)
         # یکبار در بوت با force=false تا اگر از اول داده دارد و فایل نداریم، سریع بکاپ بگیرد
         try:
             ok, msg = await self.backup_once(force=False)
@@ -8144,7 +8309,7 @@ class Manager:
                         except Exception:
                             pass
                         try:
-                            self._backup_fp = self._backup_fingerprint()
+                            self._save_backup_fp(self._backup_fingerprint())
                         except Exception:
                             pass
                         return True, f"بازیابی از دیسک محلی: {n2} مشتری" + (f" + {regen} سشن" if regen else "")
@@ -8343,7 +8508,7 @@ class Manager:
             except Exception:
                 pass
             try:
-                self._backup_fp = self._backup_fingerprint()
+                self._save_backup_fp(self._backup_fingerprint())
             except Exception:
                 pass
             return True, f"بازیابی شد: {n2} مشتری" + (f" + {regen} سشن بازسازی" if regen else "")
