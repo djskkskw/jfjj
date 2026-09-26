@@ -1167,8 +1167,8 @@ BOT_TOKEN = "8832561144:AAFSRpyaD4M9GWWsiltBMXs6acbbo6W0J-M"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_VERSION = "v0909-railway"
-BUILD_TAG = "JAFJ_MANAGER_82_v0909-railway_2026_09_07"
+BUILD_VERSION = "v0910-backup"
+BUILD_TAG = "JAFJ_MANAGER_82_v0910-backup_2026_09_26"
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  شناسه‌ی نمونه (instance) + تشخیص «سرویس قدیمی هنوز روشنه»
@@ -1437,6 +1437,74 @@ def backup_target_raw():
     # قابل بازیابی‌اند. اگر مقصد دیگری می‌خواهی، BACKUP_CHAT را صریح ست کن
     # (پذیرنده است: admin / آیدی عددی / @username).
     return "admin"
+
+
+# سقف آپلودِ ربات تلگرام ۵۰ مگابایت است. اگر zip از این بزرگ‌تر شود send_file
+# رد می‌شود و در لاگ می‌ماند — مدیر هیچ فایلی نمی‌بیند و بعد از دیپلوی
+# «پشتیبانی پیدا نشد». کمی پایین‌تر می‌مانیم.
+BOT_BACKUP_MAX_BYTES = 45 * 1024 * 1024
+
+# این‌ها داده نیستند: لاگِ سلف بی‌حد رشد می‌کند و همان باعث رد شدنِ آپلود است.
+_BACKUP_SKIP_SUFFIXES = (
+    ".log", "-wal", "-shm", "-journal", ".restore_tmp",
+    ".tmp", ".bad", ".bak",
+)
+_BACKUP_SKIP_NAMES = {"run.log", "95.py", "jafj_self.py"}
+_BACKUP_ESSENTIAL = {
+    "manager.db", "shop.db", "manager_config.json", "manager_bot.string",
+    "jafj_ai.json", ".jafj_deploy_id",
+    "jafj.session", "jafj_settings.json", "jafj_creds.json", "jafj_limits.json",
+}
+_CMD_ALIASES = {
+    "backup": "backup",
+    "restore": "restore",
+    "بکاپ": "backup",
+    "بکآپ": "backup",
+    "پشتیبان": "backup",
+    "بازیابی": "restore",
+}
+
+
+def backup_file_skipped(name):
+    """فایل‌هایی که نباید داخل zip/اثرانگشتِ پشتیبان بروند."""
+    base = os.path.basename(name or "")
+    low = base.lower()
+    if low in _BACKUP_SKIP_NAMES:
+        return True
+    if ".bak-" in low:
+        return True
+    return low.endswith(_BACKUP_SKIP_SUFFIXES)
+
+
+def backup_arc_essential(arc):
+    return os.path.basename(arc or "") in _BACKUP_ESSENTIAL
+
+
+def command_text(text):
+    """`.backup` / `.restore` و شکلِ فارسیِ تک‌کلمه‌ای را به دستور اسلش تبدیل می‌کند.
+
+    پیامِ خطای بازیابی می‌گوید `.restore` بفرست، ولی هندلر فقط `/` را می‌فهمید
+    و جوابش «/help را بزن» بود — یعنی بک‌آپِ دستی هم گرفته نمی‌شد.
+    جمله‌ها (مثل «بک آپ نمیگیره») دست نمی‌خورند.
+    """
+    t = (text or "").strip()
+    if not t:
+        return t
+    low = t.lower().replace("\u200c", "")
+    compact = low.replace(" ", "")
+    if compact in ("بکاپ", "بکآپ"):
+        return "/backup"
+    body = low[1:].strip() if low.startswith(".") and not low.startswith("..") else low
+    if body.startswith("/"):
+        body = body[1:]
+    head = body.split()[0].split("@")[0] if body else ""
+    mapped = _CMD_ALIASES.get(head) or _CMD_ALIASES.get(head.replace(" ", ""))
+    if not mapped:
+        return t
+    # فقط خودِ دستور، نه یک جمله که با این کلمه شروع شده
+    if len(body.split()) > 1:
+        return t
+    return "/" + mapped
 
 
 def maybe_migrate_to_data_dir():
@@ -2387,7 +2455,11 @@ ADMIN_HELP = """🛠 <b>پنل مدیر</b>
 /doctor — بررسی سلامت کل سیستم
 /fix — اصلاح خودکار ناهماهنگی‌ها
 /sync — بروزرسانی فایل AI مشتری‌ها
-/lim 123 — دیدن و تغییر سقف‌های یک مشتری"""
+/lim 123 — دیدن و تغییر سقف‌های یک مشتری
+
+<b>📦 پشتیبان</b>
+/backup یا .backup — گرفتن پشتیبان همین الان
+/restore یا .restore — بازیابی از آخرین پشتیبان"""
 
 
 
@@ -2504,6 +2576,8 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
         [B("📣 جوین اجباری", "a:fjoin", "danger"),
          B("📜 رویدادها", "a:mlog", "primary")],
+        [B("📦 پشتیبان بگیر", "a:backup", "success"),
+         B("♻️ بازیابی", "a:restore", "danger")],
         back_btn(),
     ]
 
@@ -5344,6 +5418,14 @@ class Manager:
                     "<code>6037991234567890 علی رضایی</code>\n\n"
                     "<i>/cancel برای لغو</i>",
                     [back_btn("a:home")])
+            if k == "backup":
+                ok, msg = await self.backup_once(force=True)
+                return await self.edit(ev, ("✅ " if ok else "❌ ") + str(msg),
+                                       [back_btn("a:home")])
+            if k == "restore":
+                ok, msg = await self.restore_from_backup(force=True)
+                return await self.edit(ev, ("✅ " if ok else "❌ ") + str(msg),
+                                       [back_btn("a:home")])
             if k in ("revenue", "stats", "users", "plans", "tk",
                      "mlog", "pstats", "doctor"):
                 cmd = {"revenue": "revenue", "stats": "stats", "users": "users",
@@ -7754,7 +7836,9 @@ class Manager:
             try:
                 for root, dirs, files in os.walk(CLIENTS_DIR):
                     for fn in sorted(files):
-                        if fn.endswith("-wal") or fn.endswith("-shm") or fn.endswith("-journal"):
+                        # لاگ و فایل موقت اثرانگشت را عوض می‌کنند بی‌آنکه دادهٔ
+                        # مشتری عوض شده باشد — و اگر داخل zip بروند آپلود رد می‌شود.
+                        if backup_file_skipped(fn):
                             continue
                         fp = os.path.join(root, fn)
                         rel = os.path.relpath(fp, BASE_DIR)
@@ -7827,6 +7911,13 @@ class Manager:
                     return True
             except Exception:
                 continue
+        # تست‌ها فایل را در _fpath می‌گذارند؛ پیامِ واقعیِ تلگرام این را ندارد.
+        try:
+            fp = getattr(m, "_fpath", None)
+            if fp and os.path.isfile(str(fp)):
+                return True
+        except Exception:
+            pass
         return False
 
     async def _find_last_backup_msg(self, target, limit=50, prefer_media=True):
@@ -7874,6 +7965,20 @@ class Manager:
         هنوز سر جایش است؛ این متد همان را پیدا می‌کند تا بازیابی و ادامهٔ
         پشتیبان از دست نرود. اگر پیدا نشد (None, None)."""
         ents = []
+        # ربات تلگرام getDialogs ندارد (BotMethodInvalid). اگر اینجا تسلیم شویم
+        # پشتیبانِ پیویِ مدیر هرگز پیدا نمی‌شود — همان «نه در تلگرام نه روی دیسک».
+        # پس اول همهٔ admin_ids را (بدون سقف) می‌گردیم، بعد اگر API اجازه داد دیالوگ‌ها.
+        for a in (self.cfg.get("admin_ids") or []):
+            try:
+                ents.append(int(a))
+            except Exception:
+                ents.append(a)
+        raw = backup_target_raw()
+        if raw and raw.lower() != "admin":
+            try:
+                ents.append(self._backup_target() or raw)
+            except Exception:
+                ents.append(raw)
         try:
             dialogs = None
             try:
@@ -7897,7 +8002,8 @@ class Manager:
         except Exception as e:
             print(f"  ⚠️ فهرست چت‌ها برای جستجوی سراسری پشتیبان: "
                   f"{type(e).__name__}: {e}", flush=True)
-            return None, None
+            if not ents:
+                return None, None
         skip_key = self._chat_key(skip)
         seen = set()
         tried = 0
@@ -8091,6 +8197,299 @@ class Manager:
         except Exception as e:
             print(f"  ⚠️ ذخیره پشتیبان محلی: {e}", flush=True)
 
+    def _extra_admin_targets(self, primary):
+        """پیویِ بقیهٔ مدیرها — اگر ارسال به مقصد اصلی شکست خورد."""
+        pk = self._chat_key(primary)
+        out = []
+        seen = {pk} if pk else set()
+        for a in (self.cfg.get("admin_ids") or []):
+            try:
+                a = int(a)
+            except Exception:
+                pass
+            k = self._chat_key(a)
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            out.append(a)
+        return out
+
+    @staticmethod
+    def _looks_sqlite(path):
+        base = os.path.basename(path or "").lower()
+        return base.endswith(".db") or base.endswith(".session")
+
+    @staticmethod
+    def _sqlite_snapshot(src, dst):
+        """کپیِ سازگار حتی وقتی WAL باز است. کپیِ خامِ فایلِ db بدون -wal دادهٔ تازه را جا می‌اندازد."""
+        src_conn = sqlite3.connect(src)
+        try:
+            dst_conn = sqlite3.connect(dst)
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
+        finally:
+            src_conn.close()
+
+    def _iter_backup_sources(self):
+        for src in (DB_FILE, SHOP_DB, CONFIG_FILE, BOT_SESSION_FILE):
+            if os.path.isfile(src):
+                yield src, os.path.basename(src)
+            else:
+                print(f"  ⚠️ پشتیبان: {src} نیست — رد شد", flush=True)
+        for extra in (os.path.join(BASE_DIR, "jafj_ai.json"),
+                      os.path.join(BASE_DIR, ".jafj_deploy_id")):
+            if os.path.isfile(extra):
+                yield extra, os.path.basename(extra)
+        if os.path.isdir(CLIENTS_DIR):
+            for root, dirs, files in os.walk(CLIENTS_DIR):
+                for fn in files:
+                    if backup_file_skipped(fn):
+                        continue
+                    fpath = os.path.join(root, fn)
+                    if not os.path.isfile(fpath):
+                        continue
+                    arc = os.path.relpath(fpath, BASE_DIR).replace(os.sep, "/")
+                    if not arc.startswith("clients/"):
+                        arc = "clients/" + os.path.basename(fpath)
+                    yield fpath, arc
+
+    def _write_backup_zip(self, tmpzip):
+        """zip پشتیبان. لاگ و فایل موقت نمی‌آیند؛ sqlite با backup API کپی می‌شود.
+        اگر از سقف آپلود ربات بزرگ‌تر شد، فایل‌های غیرضروری حذف می‌شوند.
+        خروجی: (تعداد فایل, بایت, فهرستِ حذف‌شده)."""
+        work = tempfile.mkdtemp(prefix="jafj_bk_")
+        try:
+            members = []
+            for src, arc in self._iter_backup_sources():
+                path = src
+                if self._looks_sqlite(src):
+                    snap = os.path.join(work, f"{len(members)}.snap")
+                    try:
+                        self._sqlite_snapshot(src, snap)
+                        if os.path.isfile(snap) and os.path.getsize(snap) > 0:
+                            path = snap
+                    except Exception as e:
+                        print(f"  ⚠️ اسنپ‌شات {arc}: {type(e).__name__}: {e}", flush=True)
+                        path = src
+                try:
+                    sz = os.path.getsize(path)
+                except Exception:
+                    sz = 0
+                members.append((path, arc, backup_arc_essential(arc), sz))
+            essential = [m for m in members if m[2]]
+            optional = sorted((m for m in members if not m[2]), key=lambda m: m[3])
+            chosen = list(essential)
+            used = sum(m[3] for m in chosen)
+            omitted = []
+            for item in optional:
+                if used + item[3] > BOT_BACKUP_MAX_BYTES:
+                    omitted.append(item[1])
+                    continue
+                chosen.append(item)
+                used += item[3]
+            if not chosen and members:
+                # حتی یک فایل ضروری نبود — کوچک‌ترین‌ها را تا سقف بردار
+                for item in sorted(members, key=lambda m: m[3]):
+                    if used + item[3] > BOT_BACKUP_MAX_BYTES and chosen:
+                        omitted.append(item[1])
+                        continue
+                    chosen.append(item)
+                    used += item[3]
+            if os.path.exists(tmpzip):
+                try:
+                    os.remove(tmpzip)
+                except Exception:
+                    pass
+            with zipfile.ZipFile(tmpzip, "w", zipfile.ZIP_DEFLATED) as z:
+                for path, arc, _, _ in chosen:
+                    try:
+                        z.write(path, arcname=arc)
+                    except Exception as e:
+                        print(f"  ⚠️ پشتیبان {arc}: {e}", flush=True)
+                        omitted.append(arc)
+            try:
+                size = os.path.getsize(tmpzip)
+            except Exception:
+                size = 0
+            try:
+                with zipfile.ZipFile(tmpzip, "r") as z:
+                    zcount = len(z.namelist())
+            except Exception:
+                zcount = 0
+            if omitted:
+                print(f"  ℹ️ {len(omitted)} فایل غیرضروری از پشتیبان جا ماند تا حجم از سقف تلگرام رد نشود",
+                      flush=True)
+            return zcount, size, omitted
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    async def _upload_backup(self, target, tmpzip, caption):
+        """فایل را در چت مقصد بگذار (edit همان تک‌پیام، وگرنه ارسال تازه).
+        اگر مقصد در دسترس نبود، از پیامِ پشتیبانِ قبلی در چتِ دیگر ادامه بده.
+        خروجی: (مقصدِ واقعی, پیامِ فرستاده‌شده)."""
+        old_msg = await self._find_last_backup_msg(target)
+        if old_msg is not None and not self._msg_has_media(old_msg):
+            # پیامِ متنی که فقط نشانه را نقل کرده فایل نیست؛ edit رویش بک‌آپ نمی‌سازد.
+            old_msg = None
+        if old_msg is None and not await self._backup_target_reachable(target):
+            alt_t, alt_m = None, None
+            try:
+                alt_t, alt_m = await self._find_backup_anywhere(limit=40, skip=target)
+            except Exception as e:
+                print(f"  ⚠️ جستجوی سراسری برای ادامهٔ پشتیبان: "
+                      f"{type(e).__name__}: {e}", flush=True)
+            if alt_m is not None and self._msg_has_media(alt_m):
+                print(f"  🔁 ادامهٔ پشتیبان از پیامِ قبلی در چت "
+                      f"{self._chat_key(alt_t)} (مقصد فعلی: "
+                      f"{self._chat_key(target)})", flush=True)
+                target, old_msg = alt_t, alt_m
+                self._backup_msg_id = getattr(alt_m, "id", None)
+        sent = None
+        if old_msg is not None:
+            try:
+                sent = await self.bot.edit_message(
+                    target, getattr(old_msg, "id", None), caption,
+                    file=tmpzip, force_document=True)
+            except Exception as e:
+                print(f"  ℹ️ به‌روزرسانیِ همان پیام پشتیبان ممکن نشد "
+                      f"({type(e).__name__}) — پیام تازه جایگزین قبلی می‌شود", flush=True)
+                sent = None
+        if sent is None:
+            try:
+                sent = await self.bot.send_file(
+                    target, tmpzip, caption=caption, force_document=True)
+            except TypeError:
+                sent = await self.bot.send_file(target, tmpzip, caption=caption)
+            if old_msg is not None:
+                try:
+                    await self.bot.delete_messages(target, [getattr(old_msg, "id", None)])
+                except Exception:
+                    pass
+        return target, sent
+
+    async def _tell_admins_backup_failed(self, reason):
+        """خطای پشتیبانِ خودکار را به پیوی مدیر بگو — وگرنه فقط در لاگ می‌ماند
+        و مدیر فکر می‌کند بک‌آپ گرفته می‌شود."""
+        reason = (reason or "").strip()
+        if not reason or "بدون تغییر" in reason:
+            return
+        now_t = time.time()
+        last = getattr(self, "_backup_fail_at", 0)
+        last_reason = getattr(self, "_backup_fail_reason", "")
+        if reason == last_reason and now_t - last < 1800:
+            return
+        self._backup_fail_at = now_t
+        self._backup_fail_reason = reason
+        text = ("⚠️ <b>پشتیبان گرفته نشد</b>\n\n"
+                f"{reason}\n\n"
+                "تا وقتی این خطا هست، بعد از دیپلوی اطلاعات برنمی‌گردد.\n"
+                "دوباره: <code>.backup</code>")
+        for a in (self.cfg.get("admin_ids") or []):
+            try:
+                await self.say(a, text, key="backup_fail")
+            except Exception:
+                pass
+
+    async def accept_admin_backup_file(self, ev):
+        """اگر مدیر zip پشتیبان را در پیوی فرستاد، ذخیره کن تا `.restore` پیدایش کند.
+
+        پیامِ خطای بازیابی همین را می‌گوید، ولی قبلاً فقط پیامِ خودِ ربات قبول
+        می‌شد و فایلِ مدیر دور ریخته می‌شد.
+        """
+        uid = getattr(ev, "sender_id", None)
+        if not self.is_admin(uid):
+            return False
+        st = (self.fsm.get(uid) or {}).get("step")
+        if st in ("tut_set", "sec_set"):
+            return False
+        msg = getattr(ev, "message", None) or ev
+        doc = getattr(ev, "document", None) or getattr(msg, "document", None)
+        if doc is None:
+            return False
+        name = ""
+        try:
+            f = getattr(msg, "file", None) or getattr(ev, "file", None)
+            name = getattr(f, "name", None) or ""
+        except Exception:
+            name = ""
+        caption = ""
+        try:
+            caption = (getattr(ev, "raw_text", None) or getattr(msg, "message", None) or "")
+        except Exception:
+            caption = ""
+        mime = (getattr(doc, "mime_type", None) or "")
+        looks = (str(name).lower().endswith(".zip") or "zip" in str(mime).lower()
+                 or BACKUP_TAG in str(caption) or "پشتیبان" in str(caption))
+        if not looks:
+            return False
+        tmp = os.path.join(tempfile.gettempdir(),
+                           f"jafj_in_{int(time.time())}_{os.getpid()}.zip")
+        try:
+            downloaded = await self.bot.download_media(msg, file=tmp)
+        except Exception as e:
+            await self.say(uid, f"❌ دانلود فایل پشتیبان نشد: {type(e).__name__}")
+            return True
+        path = downloaded if isinstance(downloaded, str) and os.path.isfile(downloaded) else tmp
+        if not os.path.isfile(path):
+            await self.say(uid, "❌ فایل پشتیبان دانلود نشد.")
+            return True
+        try:
+            with zipfile.ZipFile(path, "r") as z:
+                names = [n.replace("\\", "/") for n in z.namelist()]
+        except Exception:
+            await self.say(uid, "❌ این فایل zip سالم نیست.")
+            return True
+        if not any(os.path.basename(n) in ("manager.db", "shop.db", "manager_config.json")
+                   or n.startswith("clients/") for n in names):
+            await self.say(uid, "این zip پشتیبان جفج نیست — داخلش manager.db نیست.")
+            return True
+        try:
+            latest = os.path.join(BASE_DIR, "jafj_backup_latest.zip")
+            shutil.copy2(path, latest)
+            try:
+                os.chmod(latest, 0o600)
+            except Exception:
+                pass
+        except Exception as e:
+            await self.say(uid, f"❌ ذخیرهٔ فایل پشتیبان نشد: {type(e).__name__}")
+            return True
+        await self.say(uid,
+                       "✅ <b>فایل پشتیبان ذخیره شد</b>\n\n"
+                       "برای برگرداندن اطلاعات بفرست: <code>.restore</code>")
+        return True
+
+    async def _graceful_stop(self):
+        """SIGTERM دیپلوی: قبل از مرگ یک پشتیبان پایانی بگیر. دیتابیس خالی
+        پشتیبانِ قبلی را بازنویسی نمی‌کند."""
+        if getattr(self, "_stopping", False):
+            return
+        self._stopping = True
+        print("  📦 خاموشی — پشتیبان پایانی…", flush=True)
+        try:
+            n = 0
+            try:
+                r = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
+                n = r["c"] if r else 0
+            except Exception:
+                n = 0
+            if n:
+                await asyncio.wait_for(self.backup_once(force=True), timeout=20)
+            else:
+                print("  ℹ️ دیتابیس خالی است — پشتیبان قبلی بازنویسی نشد", flush=True)
+        except Exception as e:
+            print(f"  ⚠️ پشتیبان پایانی: {type(e).__name__}: {e}", flush=True)
+        try:
+            self.sup.shutdown()
+        except Exception:
+            pass
+        try:
+            if self.bot is not None:
+                await self.bot.disconnect()
+        except Exception:
+            pass
+
     async def backup_once(self, force=False):
         """یک پشتیبان zip بساز و به تلگرام + دیسک بفرست.
         اگر اثرانگشت عوض نشده و force نباشد، کاری نمی‌کند."""
@@ -8134,7 +8533,9 @@ class Manager:
                 # داده‌ها از آخرین پشتیبان عوض نشده — ولی فقط وقتی «هیچ کاری
                 # نکن» که پیامِ پشتیبان هنوز در چت هست؛ اگر مدیر آن تک‌پیام را
                 # پاک کرده باشد، همین‌جا دوباره ساخته می‌شود.
-                if await self._find_last_backup_msg(target, limit=100) is not None:
+                existing = await self._find_last_backup_msg(target, limit=100)
+                # پیامِ متنیِ بی‌فایل «پشتیبان موجود» نیست — وگرنه بک‌آپ هرگز فرستاده نمی‌شود.
+                if existing is not None and self._msg_has_media(existing):
                     return False, "بدون تغییر"
         # چک‌پوینت WAL تا کپی db کامل باشد
         try:
@@ -8163,106 +8564,46 @@ class Manager:
             pass
         tmpzip = os.path.join(tempfile.gettempdir(), f"jafj_backup_{int(time.time())}_{os.getpid()}.zip")
         try:
-            with zipfile.ZipFile(tmpzip, "w", zipfile.ZIP_DEFLATED) as z:
-                # فایل‌های اصلی
-                for src in (DB_FILE, SHOP_DB, CONFIG_FILE, BOT_SESSION_FILE):
-                    if os.path.isfile(src):
-                        z.write(src, arcname=os.path.basename(src))
-                    else:
-                        print(f"  ⚠️ پشتیبان: {src} نیست — رد شد", flush=True)
-                # jafj_ai و deploy_id
-                for extra in (os.path.join(BASE_DIR, "jafj_ai.json"), os.path.join(BASE_DIR, ".jafj_deploy_id")):
-                    if os.path.isfile(extra):
-                        z.write(extra, arcname=os.path.basename(extra))
-                # کل clients/ — هر مشتری: jafj.session, jafj_settings.json, limits, ...
-                if os.path.isdir(CLIENTS_DIR):
-                    for root, dirs, files in os.walk(CLIENTS_DIR):
-                        for fn in files:
-                            if fn.endswith("-wal") or fn.endswith("-shm") or fn.endswith("-journal") or fn.endswith(".restore_tmp"):
-                                continue
-                            fpath = os.path.join(root, fn)
-                            try:
-                                # لینک خراب را رد کن
-                                if not os.path.isfile(fpath):
-                                    continue
-                                arc = os.path.relpath(fpath, BASE_DIR)
-                                # فقط داخل clients/ را قبول کن
-                                if not arc.startswith("clients"+os.sep):
-                                    arc = os.path.join("clients", os.path.basename(fpath))
-                                z.write(fpath, arcname=arc)
-                            except Exception as e:
-                                print(f"  ⚠️ پشتیبان clients/{fn}: {e}", flush=True)
+            zcount, sz, omitted = self._write_backup_zip(tmpzip)
+            if zcount <= 0 or not os.path.isfile(tmpzip) or sz <= 0:
+                return False, "فایل پشتیبان خالی ساخته شد"
+            try:
+                self._save_local_backup_copy(tmpzip)
+            except Exception as e:
+                print(f"  ⚠️ ذخیره محلی پشتیبان: {e}", flush=True)
+            if sz > 50 * 1024 * 1024:
+                return False, (f"حجم پشتیبان {sz // (1024 * 1024)}MB از سقف ۵۰MB ربات تلگرام بیشتر است — ارسال رد می‌شد")
             try:
                 cnt = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
                 n = cnt["c"] if cnt else 0
             except Exception:
                 n = "?"
-            # محاسبه حجم و تعداد فایل داخل zip برای کپشن
-            try:
-                with zipfile.ZipFile(tmpzip, "r") as zz:
-                    zcount = len(zz.namelist())
-            except Exception:
-                zcount = 0
-            try:
-                sz = os.path.getsize(tmpzip)
-            except Exception:
-                sz = 0
-            # کپی محلی روی Disk قبل از ارسال تلگرام (اگر تلگرام fail هم شد، روی دیسک بماند)
-            try:
-                self._save_local_backup_copy(tmpzip)
-            except Exception as e:
-                print(f"  ⚠️ ذخیره محلی پشتیبان: {e}", flush=True)
+            omit_note = f" omitted={len(omitted)}" if omitted else ""
             caption = (f"{BACKUP_TAG} {datetime.now():%Y-%m-%d %H:%M} clients={n} files={zcount} "
-                       f"size={sz//1024}KB build={BUILD_VERSION} \u2502 "
+                       f"size={sz//1024}KB build={BUILD_VERSION}{omit_note} \u2502 "
                        f"\U0001F4E6 پشتیبان کامل (DB+shop+clients) — همین «یک» پیام همیشه با آخرین نسخه به‌روز می‌شود؛ پاکش نکن؛ بعد از هر دیپلوی/ری‌استارت Render خودکار برمی‌گردد")
             # ── فقط «یک» پیامِ پشتیبان در این چت بماند ──
             # پیام پشتیبان قبلی پیدا می‌شود؛ اگر بود، مدیای «همان» پیام با zip
             # تازه عوض می‌شود (edit) — پیام جدیدی به پیوی اضافه نمی‌شود. اگر edit
             # ممکن نبود (مثلاً ۴۸ ساعت از ارسالش گذشته باشد)، پیام تازه می‌رود و
             # قبلی درجا پاک می‌شود؛ نتیجه در هر دو حالت: فقط یک پیام پشتیبان.
-            old_msg = await self._find_last_backup_msg(target)
-            if old_msg is None and not await self._backup_target_reachable(target):
-                # در این چت هیچ پیامِ پشتیبانی نیست و مقصد اصلاً برای ربات در
-                # دسترس هم نیست (بعد از دیپلوی admin_ids به پیش‌فرضِ هاردکد
-                # برمی‌گردد و ربات هرگز آنجا پیام نداده). قبل از شکستِ همیشگی،
-                # پیامِ پشتیبانِ قبلی را سراسری بگرد و از همان ادامه بده تا
-                # «تک‌پیامِ پشتیبان» گم نشود.
-                # نکته: اگر مقصد در دسترس باشد و فقط خالی باشد (مدیر عمداً
-                # BACKUP_CHAT را به چتِ تازه‌ای منتقل کرده)، پیامِ تازه همان‌جا
-                # ساخته می‌شود — یعنی انتقالِ عمدیِ مقصد هنوز کار می‌کند.
-                alt_t, alt_m = None, None
-                try:
-                    alt_t, alt_m = await self._find_backup_anywhere(limit=40, skip=target)
-                except Exception as e:
-                    print(f"  ⚠️ جستجوی سراسری برای ادامهٔ پشتیبان: "
-                          f"{type(e).__name__}: {e}", flush=True)
-                if alt_m is not None:
-                    print(f"  🔁 ادامهٔ پشتیبان از پیامِ قبلی در چت "
-                          f"{self._chat_key(alt_t)} (مقصد فعلی: "
-                          f"{self._chat_key(target)})", flush=True)
-                    target, old_msg = alt_t, alt_m
-                    self._backup_msg_id = getattr(alt_m, "id", None)
             sent = None
-            if old_msg is not None:
+            last_up = None
+            try_targets = [target] + self._extra_admin_targets(target)
+            for i, t in enumerate(try_targets):
                 try:
-                    sent = await self.bot.edit_message(
-                        target, getattr(old_msg, "id", None), caption,
-                        file=tmpzip, force_document=True)
+                    target, sent = await self._upload_backup(t, tmpzip, caption)
+                    break
                 except Exception as e:
-                    print(f"  ℹ️ به‌روزرسانیِ همان پیام پشتیبان ممکن نشد "
-                          f"({type(e).__name__}) — پیام تازه جایگزین قبلی می‌شود", flush=True)
-                    sent = None
+                    last_up = e
+                    print(f"  ⚠️ ارسال پشتیبان به {self._chat_key(t)}: "
+                          f"{type(e).__name__}: {e}", flush=True)
+                    if i + 1 < len(try_targets):
+                        print("  🔁 تلاش در پیوی مدیر بعدی…", flush=True)
             if sent is None:
-                # اول تازه را بفرست، بعد قبلی را پاک کن — تا بین این دو، همیشه
-                # یک پشتیبانِ معتبر در چت موجود باشد.
-                sent = await self.bot.send_file(target, tmpzip, caption=caption)
-                if old_msg is not None:
-                    try:
-                        await self.bot.delete_messages(target, [getattr(old_msg, "id", None)])
-                    except Exception:
-                        pass
+                raise last_up or RuntimeError("ارسال پشتیبان ناموفق")
             try:
-                self._backup_msg_id = getattr(sent, "id", None) or getattr(old_msg, "id", None)
+                self._backup_msg_id = getattr(sent, "id", None)
             except Exception:
                 self._backup_msg_id = None
             # تایید متنی کوتاه در PV مدیر (غیر از فایل) — فقط در حالت دستی / موقع اولین بکاپ خودکار بعد از تغییری بزرگ
@@ -8298,8 +8639,8 @@ class Manager:
     async def backup_loop(self):
         """حلقه پشتیبان خودکار — هر backup_interval() یکبار، بیدار و اثرانگشت را چک می‌کند.
         روی Render رایگان پیش‌فرض ۱۲۰ثانیه است تا بین دو دیپلوی نهایت ۲ دقیقه داده از دست برود.
-        موفقیت/خطا در لاگ می‌ماند؛ پیام تلگرامیِ فایلِ پشتیبان خودش تایید است (اسپم متنی ندارد)."""
-        await asyncio.sleep(10)
+        اگر ارسال شکست بخورد، دلیلش به پیوی مدیر می‌رود — سکوت یعنی «بک‌آپ نمی‌گیرد»."""
+        await asyncio.sleep(3)
         # پاک‌سازیِ یکباره‌ی پیام‌های پشتیبانِ اضافیِ مانده از نسخه‌های قبل —
         # قبلاً هر پشتیبان یک پیامِ تازه در پیوی مدیر می‌گذاشت و انباشته می‌شد.
         # حالا به‌جز «تک‌پیامِ» پشتیبان، بقیه با سقفِ محدود پاک می‌شوند.
@@ -8313,13 +8654,6 @@ class Manager:
                     await self._cleanup_extra_backup_msgs(_t, keep_id=_kid)
         except Exception as e:
             print(f"  ⚠️ پاک‌سازی پشتیبان‌های اضافی: {type(e).__name__}", flush=True)
-        # یکبار در بوت با force=false تا اگر از اول داده دارد و فایل نداریم، سریع بکاپ بگیرد
-        try:
-            ok, msg = await self.backup_once(force=False)
-            if ok:
-                print(f"  📦 پشتیبان خودکار (اولین): {msg}", flush=True)
-        except Exception as e:
-            print(f"  ⚠️ پشتیبان اولیه: {type(e).__name__}: {e}", flush=True)
         while True:
             try:
                 interval = backup_interval()
@@ -8327,12 +8661,22 @@ class Manager:
                     ok, msg = await self.backup_once(force=False)
                     if ok:
                         print(f"  📦 پشتیبان خودکار: {msg}", flush=True)
-                    elif "بدون تغییر" not in msg:
+                    elif "بدون تغییر" not in (msg or ""):
                         print(f"  ℹ️ پشتیبان خودکار: {msg}", flush=True)
+                        if "عمومی" not in (msg or ""):
+                            await self._tell_admins_backup_failed(msg)
+                        # FloodWait را با خوابِ خودش رد کن، نه با چکش زدن هر ۲ دقیقه
+                        if msg and "FloodWait" in msg:
+                            digits_only = "".join(ch for ch in msg if ch.isdigit())
+                            try:
+                                interval = min(3600, max(interval, int(digits_only or 0) + 5))
+                            except Exception:
+                                pass
                 except Exception as e:
                     print(f"  ⚠️ پشتیبان خودکار: {type(e).__name__}: {e}", flush=True)
                     import traceback
                     traceback.print_exc()
+                    await self._tell_admins_backup_failed(f"{type(e).__name__}: {e}")
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
@@ -8827,7 +9171,8 @@ class Manager:
                           f"• چتِ پشتیبان: <code>{backup_target_raw()}</code>\n"
                           "• اگر تک‌پیامِ فایلِ پشتیبان را پاک کرده‌ای، همان zip را "
                           "دوباره در این چت بفرست.\n"
-                          "• بعد از رفع، <code>.restore</code> را بفرست.")
+                          "• بعد از رفع، <code>.restore</code> را بفرست.\n"
+                          "• گرفتنِ دستی: <code>.backup</code> — اگر خودکار خطا بدهد دلیلش همین‌جا می‌آید.")
             sent_any = False
             for a in (self.cfg.get("admin_ids") or []):
                 try:
@@ -8961,17 +9306,24 @@ class Manager:
         print(f"{'='*54}\n")
 
         threading.Thread(target=self.sup.watchdog, daemon=True).start()
-        asyncio.create_task(self.duplicate_watch_loop())
-        asyncio.create_task(self.reminder_loop())
-        asyncio.create_task(self.points_loop())
-        asyncio.create_task(self.trial_loop())
+        # ارجاع را نگه دار؛ وگرنه حلقهٔ پشتیبان ممکن است وسط کار جمع شود و بک‌آپ نرود.
+        self._bg_tasks = []
+        for _coro in (self.duplicate_watch_loop(), self.reminder_loop(),
+                      self.points_loop(), self.trial_loop()):
+            self._bg_tasks.append(asyncio.create_task(_coro))
         # پشتیبان خودکار روی تلگرام
         try:
             if backup_target_raw():
-                asyncio.create_task(self.backup_loop())
+                self._bg_tasks.append(asyncio.create_task(self.backup_loop()))
                 print(f"  📦 پشتیبان خودکار فعال: هر {backup_interval()}s به {backup_target_raw()}", flush=True)
         except Exception as e:
             print(f"  ⚠️ پشتیبان خودکار: {e}", flush=True)
+        try:
+            _loop = asyncio.get_running_loop()
+            _loop.add_signal_handler(
+                signal.SIGTERM, lambda: asyncio.create_task(self._graceful_stop()))
+        except Exception as e:
+            print(f"  ⚠️ سیگنال خاموشی: {type(e).__name__}", flush=True)
 
         @self.bot.on(events.NewMessage(incoming=True))
         async def handler(ev):
@@ -8998,7 +9350,12 @@ class Manager:
                         f"✅ رسید سفارش #{_fa_digits(op['id'])} دریافت شد.\n"
                         "به‌محض تأیید، سرویست فعال می‌شود.")
             uid = ev.sender_id
-            text = (ev.raw_text or "").strip()
+            text = command_text(ev.raw_text or "")
+            try:
+                if self.is_admin(uid) and await self.accept_admin_backup_file(ev):
+                    return
+            except Exception as e:
+                print(f"  ⚠️ فایل پشتیبان مدیر: {type(e).__name__}: {e}", flush=True)
             sender = await ev.get_sender()
             user = {"username": getattr(sender, "username", None),
                     "name": getattr(sender, "first_name", "") or ""}
