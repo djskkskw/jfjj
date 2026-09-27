@@ -1571,7 +1571,8 @@ DEFAULTS = {
     "card_name": "",        # نام صاحب کارت
     "pay_note": "",         # توضیح اضافه‌ی پرداخت
     "referral_percent": 0,  # سازگاری؛ پاداش درصدی حذف شده است
-    "referral_points": 2,   # پاداش هر دعوت معتبر پس از تأیید شماره ایران
+    "referral_points": 2,   # پاداش هر دعوت معتبر وقتی معرف اصلاً سلف فعال ندارد
+    "referral_points_self": 1,  # پاداش هر دعوت معتبر وقتی سلف روی اکانت معرف فعال است
     "remind_days": 3,       # چند روز قبل از انقضا یادآوری
     # ── سیستم امتیاز (خریدنی) ──
     "points_on": True,  # فیکس: امتیاز همیشه روشن
@@ -4778,7 +4779,7 @@ class Manager:
             if not self.phone_ok(uid):
                 txt = ("🎁 <b>زیرمجموعه‌گیری</b>\n" + self.LINE + "\n\n"
                        "برای فعال‌شدن پاداش دعوت، اول شماره موبایل ایرانت را تأیید کن.\n"
-                       f"🎯 پاداش هر دعوت معتبر: <b>{_fa_digits(self.cfg.get('referral_points', 2))} امتیاز</b>\n"
+                       + self.referral_rate_text(uid) + "\n"
                        "فعال‌سازی سلف لازم نیست.")
                 return await self.edit(ev, txt,
                     [[B("✅ تأیید شماره", "r:verify", "success")], back_btn()])
@@ -4791,7 +4792,7 @@ class Manager:
                 "🎁 <b>زیرمجموعه‌گیری</b>\n" + self.LINE + "\n"
                 "✅ شماره تأیید شده\n\n"
                 f"🔗 <b>لینک دعوت شما</b>\n<code>{link}</code>\n\n"
-                f"🎯 پاداش هر دعوت معتبر: <b>{_fa_digits(self.cfg.get('referral_points', 2))} امتیاز</b>\n"
+                + self.referral_rate_text(uid) + "\n"
                 "دعوت‌شده باید شماره موبایل ایرانش را تأیید کند.\n"
                 + self.LINE + "\n"
                 f"👥 دعوت‌شده: {_fa_digits(len(refs))} نفر\n"
@@ -5663,8 +5664,53 @@ class Manager:
         self.db.set(uid, phone=normalized, phone_verified=1)
         return normalized
 
+    def self_active(self, uid):
+        """سلف روی اکانت این کاربر فعال است؟
+
+        فعال یعنی یا پروسه‌ی سلفش همین الان روشن است، یا اکانت تلگرامش وصل شده
+        (سشن دارد) و وضعیتش active و منقضی‌نشده است. کاربری که اصلاً سلف
+        راه‌اندازی نکرده یا سلفش منقضی/مسدود شده، «بدون سلف» حساب می‌شود.
+        """
+        try:
+            if self.sup and self.sup.is_running(uid):
+                return True
+        except Exception:
+            pass
+        c = self.db.get(uid)
+        if not c or not c.get("session") or c.get("status") != "active":
+            return False
+        exp = int(c.get("expires_at") or 0)
+        return exp == 0 or exp > now()
+
+    def _cfg_points(self, key, default):
+        try:
+            v = self.cfg.get(key, default)
+            return max(0, int(default if v is None else v))
+        except Exception:
+            return default
+
+    def referral_points_for(self, referrer_uid):
+        """پاداش هر دعوت معتبر برای این معرف:
+        سلف فعال → referral_points_self (پیش‌فرض ۱)،
+        بدون سلف → referral_points (پیش‌فرض ۲)."""
+        if self.self_active(referrer_uid):
+            return self._cfg_points("referral_points_self", 1)
+        return self._cfg_points("referral_points", 2)
+
+    def referral_rate_text(self, uid):
+        """متن نرخ پاداش دعوت برای نمایش در بخش زیرمجموعه."""
+        pts = _fa_digits(self.referral_points_for(uid))
+        if self.self_active(uid):
+            return (f"🎯 پاداش هر دعوت معتبر: <b>{pts} امتیاز</b> (سلف روی اکانتت فعال است)\n"
+                    f"ℹ️ بدون سلف فعال، هر دعوت "
+                    f"{_fa_digits(self._cfg_points('referral_points', 2))} امتیاز است.")
+        return (f"🎯 پاداش هر دعوت معتبر: <b>{pts} امتیاز</b> (سلف روی اکانتت فعال نیست)\n"
+                f"ℹ️ با سلف فعال، هر دعوت "
+                f"{_fa_digits(self._cfg_points('referral_points_self', 1))} امتیاز است.")
+
     def reward_verified_referral(self, invitee_uid):
-        """پس از تأیید شماره دعوت‌شده، یک‌بار ۲ امتیاز به معرف بده."""
+        """پس از تأیید شماره دعوت‌شده، یک‌بار به معرف امتیاز بده
+        (سلف فعال: ۱ امتیاز، بدون سلف: ۲ امتیاز — قابل تنظیم با /set)."""
         if not (self.shop and self.cfg["points_on"]):
             return None, 0
         invitee = self.db.get(invitee_uid) or {}
@@ -5681,7 +5727,7 @@ class Manager:
         if same:
             return None, 0
         return self.shop.reward_verified_referral(
-            invitee_uid, referrer_uid, int(self.cfg.get("referral_points", 2) or 2))
+            invitee_uid, referrer_uid, self.referral_points_for(referrer_uid))
 
     def reward_existing_referrals(self, referrer_uid):
         """اگر دعوت‌شده قبلاً تأیید کرده بود، بعد از تأیید معرف پاداش را تکمیل کن."""
@@ -6139,7 +6185,7 @@ class Manager:
             rewarded = sum(1 for r in refs if r["rewarded"])
             return await self.say(chat,
                 f"🎁 <b>لینک زیرمجموعه</b>\n\n<code>{link}</code>\n\n"
-                f"🎯 هر دعوت معتبر: {_fa_digits(self.cfg.get('referral_points', 2))} امتیاز\n"
+                + self.referral_rate_text(uid) + "\n"
                 f"👥 دعوت‌شده: {_fa_digits(len(refs))}\n"
                 f"✅ معتبر: {_fa_digits(rewarded)}")
 
