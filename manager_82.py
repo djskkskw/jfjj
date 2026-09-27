@@ -1578,7 +1578,7 @@ DEFAULTS = {
     "cost_per_hour": 1,      # هر ساعت کارکرد چند امتیاز  (2 ساعت = 2 امتیاز)
     "min_points": 20,        # حداقل امتیاز لازم برای فعال‌سازی
     "start_fee": 20,         # هزینه هر بار روشن کردن دستی
-    "restart_fee": 10,       # هزینه روشن کردن دوباره
+    "restart_fee": 20,       # هزینه روشن کردن دوباره
     "self_error_fee": 5,     # خطای خود سلف؛ خطای مدیر/سیستم رایگان
     "low_warn": 10,          # زیر این عدد هشدار بده
     "point_price": 250,      # قیمت هر امتیاز در خرید دلخواه (تومان)
@@ -1687,8 +1687,8 @@ class Config:
                     # False و رشته خالی مقدار معتبرند؛ فقط کلیدهای ناشناخته را رد کن.
                     if k in DEFAULTS:
                         self.d[k] = v
-                if "restart_fee" not in self.d:
-                    self.d["restart_fee"] = 10
+                if self.d.get("restart_fee") in (None, 10):
+                    self.d["restart_fee"] = 20
             except Exception as e:
                 print(f"⚠️ خواندن تنظیمات: {e}")
         # اولویت اتصال: متغیر محیطی → manager_config.json → هاردکد.
@@ -3066,10 +3066,10 @@ class Manager:
         return False, "اشتراک فعال نداری"
 
     def charge_start(self, uid, first=False):
-        """هزینه روشن‌کردن: بار اول ۲۰ امتیاز، دفعات بعد از خاموشی ۱۰ امتیاز."""
+        """هزینه روشن‌کردن دستی؛ بار اول و روشن‌کردن دوباره هر دو پیش‌فرض ۲۰ امتیاز."""
         if self.has_sub(uid) or self.trial_active(uid) or not (self.shop and self.cfg["points_on"]):
             return True, ""
-        fee = self.cfg["start_fee"] if first else self.cfg.get("restart_fee", 10)
+        fee = self.cfg["start_fee"] if first else self.cfg.get("restart_fee", 20)
         fee = max(0, int(fee))
         if fee <= 0:
             return True, ""
