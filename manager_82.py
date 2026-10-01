@@ -1597,6 +1597,10 @@ DEFAULTS = {
     "greet_noon": "",       # ۱۲ تا ۱۷
     "greet_evening": "",    # ۱۷ تا ۲۱
     "greet_night": "",      # ۲۱ تا ۵
+    # ── «📋 دستورات آماده» — راهنمای مرحله‌به‌مرحله‌ی فعال‌سازی سلف ──
+    # هر مورد: {"title": عنوان، "cmd": دستور، "note": توضیح ساده}
+    "cmd_items": [],
+    "cmd_intro": "",        # متنِ بالای صفحه‌ی دستورات آماده (خالی = متن پیش‌فرض)
     # ── فروشگاه ──
     "shop_on": True,
     "card_number": "",      # شماره کارت برای واریز
@@ -1758,6 +1762,11 @@ class Config:
         # مقدار قدیمی ۱۰ برای شروع، اکنون ۲۰ امتیاز است.
         if self.d.get("start_fee") in (None, 10):
             self.d["start_fee"] = 20
+        # cmd_items یک لیست است و dict(DEFAULTS) کپیِ کم‌عمق می‌کند؛ بدون این
+        # کپی، تغییرِ درجای لیست، پیش‌فرضِ خودِ ماژول را هم خراب می‌کرد.
+        _ci = self.d.get("cmd_items")
+        self.d["cmd_items"] = [dict(x) for x in _ci if isinstance(x, dict)] \
+            if isinstance(_ci, list) else []
 
     def save(self):
         tmp = CONFIG_FILE + ".tmp"
@@ -2513,7 +2522,8 @@ def B(text, data, style=None):
 
 
 def main_menu(is_admin=False, shop_on=True, points_on=True,
-              has_session=False, running=False, trial_available=False):
+              has_session=False, running=False, trial_available=False,
+              has_cmds=False):
     rows = []
     # قدم اول همیشه بالا و برجسته
     # این دکمه همیشه باشد تا اکانت خارج‌شده یا اکانت قابل‌تعویض دوباره راه‌اندازی شود.
@@ -2539,6 +2549,9 @@ def main_menu(is_admin=False, shop_on=True, points_on=True,
                      B("🎧 پشتیبانی", "m:support", "primary")])
     rows.append([B("📚 آموزش فعال‌سازی", "m:tut", "success"),
                  B("📖 راهنما", "m:help")])
+    # فقط وقتی مدیر دستوری ثبت کرده باشد؛ وگرنه دکمه‌ی خالی می‌دهد.
+    if has_cmds:
+        rows.append([B("📋 دستورات آماده", "m:cmds", "success")])
     if is_admin:
         rows.append([B("🛠 پنل مدیر", "a:home", "danger")])
     return rows
@@ -2607,7 +2620,8 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B("🧩 بخش‌های آموزش", "a:secs", "success")],
         [B("📝 متن خوش‌آمدگویی", "a:welcome", "primary"),
          B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
-        [B("📋 دستورات آماده", "a:rt", "success")],
+        [B("📝 متن‌های ربات", "a:rt", "success"),
+         B("📋 دستورات آماده", "a:cm", "success")],
         [B("📣 جوین اجباری", "a:fjoin", "danger"),
          B("📜 رویدادها", "a:mlog", "primary")],
         [B("📦 پشتیبان بگیر", "a:backup", "success"),
@@ -2985,6 +2999,10 @@ class Manager:
         except Exception:
             pass
         kb = [[B("⚙️ سرویس من", "m:svc", "primary")]]
+        # اگر مدیر دستوری ثبت کرده باشد، راهنمای مرحله‌به‌مرحله همین‌جا
+        # زیرِ پیام «راه‌اندازی شد» در دسترس مشتری است.
+        if self.has_cmds():
+            kb.append([B("📋 دستورات آماده", "m:cmds", "success")])
         if not ok:
             kb = []
             if self.cfg["points_on"] and self.shop:
@@ -3023,7 +3041,7 @@ class Manager:
     LINE = "━━━━━━━━━━━━━━━"
 
     # ═══════════════════════════════════════════════
-    #  📋 دستورات آماده — همه‌ی متن‌های قابل‌تنظیمِ ربات یک‌جا
+    #  📝 متن‌های ربات — همه‌ی متن‌های قابل‌تنظیمِ ربات یک‌جا
     #  (id, emoji, عنوان، کلید در cfg، چندخطی؟، سقف حرف، توضیح)
     # ═══════════════════════════════════════════════
     READY_TEXTS = (
@@ -3085,7 +3103,7 @@ class Manager:
         if row:
             kb.append(row)
         kb.append(back_btn("a:home"))
-        txt = (f"📋 <b>دستورات آماده</b>\n{self.LINE}\n"
+        txt = (f"📝 <b>متن‌های ربات</b>\n{self.LINE}\n"
                "همه‌ی متن‌هایی که ربات به مشتری می‌گوید را از همین‌جا خودت "
                "تنظیم کن. روی هر مورد بزن، متن فعلی را ببین و عوضش کن.\n\n"
                "✅ = متنِ خودت ثبت شده\n"
@@ -3114,7 +3132,7 @@ class Manager:
         kb.append(back_btn("a:rt"))
         return "\n".join(t), kb
 
-    # پیش‌فرضِ سلام‌ها؛ مدیر از «📋 دستورات آماده» عوضشان می‌کند.
+    # پیش‌فرضِ سلام‌ها؛ مدیر از «📝 متن‌های ربات» عوضشان می‌کند.
     GREET_DEFAULTS = {
         "greet_morning": ("صبح بخیر ☀️", "سلام صبحت بخیر 🌤", "صبحت پرانرژی ☕️"),
         "greet_noon": ("سلام 👋", "ظهرت بخیر 🌞", "خسته نباشی 🙌"),
@@ -3143,6 +3161,228 @@ class Manager:
         # ساعتِ محلیِ ربات (Asia/Tehran)، نه ساعتِ سرور
         h = local_now().hour if hour is None else int(hour)
         return random.choice(self.greet_options(self.greet_key(h)))
+
+    # ═══════════════════════════════════════════════
+    #  📋 دستورات آماده — راهنمای مرحله‌به‌مرحله‌ی فعال‌سازی سلف
+    #  مدیر عنوان/دستور/توضیح را ثبت می‌کند؛ داده در cfg["cmd_items"] و
+    #  cfg["cmd_intro"] می‌ماند. مشتری همین‌ها را شماره‌دار می‌بیند و هر
+    #  دستور داخل <code> است تا با یک لمس کپی شود.
+    # ═══════════════════════════════════════════════
+    CM_MAX = 40            # سقفِ تعدادِ دستور در لیست
+    CM_MSG_LIMIT = 3800    # سقفِ حرفِ هر پیامِ مشتری (بعد از آن شکسته می‌شود)
+
+    # «⚡️ پیشنهادِ شروع» — پنج دستور از راهنمای خودِ سلف (HELP در 95.py).
+    # فقط وقتی لیست خالی است پیشنهاد می‌شود.
+    CMD_STARTER = (
+        ("پنل", ".panel",
+         "داشبورد سلف؛ وضعیت، اعتبار و همه‌ی تنظیمات از همین‌جاست."),
+        ("کانال", "کانال @channel",
+         "کانالی که پیام‌ها به آن می‌روند را معرفی کن؛ جای @channel آیدی کانال خودت."),
+        ("افزودن گروه", "افزودن گروه @group",
+         "گروه تبادل را اضافه کن؛ جای @group آیدی گروه را بنویس."),
+        ("تبادل روشن", "تبادل روشن",
+         "حالت تبادل ممبر را روشن می‌کند."),
+        ("راهنما", "راهنما",
+         "فهرست همه‌ی دستورهای سلف را می‌فرستد."),
+    )
+
+    def cmd_items(self):
+        """لیستِ تمیزِ دستورهای ثبت‌شده؛ داده‌ی خراب را بی‌صدا رد می‌کند."""
+        raw = self.cfg.get("cmd_items")
+        out = []
+        if isinstance(raw, list):
+            for it in raw:
+                if not isinstance(it, dict):
+                    continue
+                d = {"title": str(it.get("title") or "").strip()[:80],
+                     "cmd": str(it.get("cmd") or "").strip()[:200],
+                     "note": str(it.get("note") or "").strip()[:300]}
+                if d["title"] or d["cmd"]:   # موردِ کاملاً خالی شمرده نمی‌شود
+                    out.append(d)
+        return out
+
+    def cmd_save(self, items):
+        """ذخیره‌ی لیست (همیشه کپیِ تازه، تا پیش‌فرضِ ماژول دست‌نخورده بماند)."""
+        self.cfg["cmd_items"] = [dict(x) for x in items]
+
+    def has_cmds(self):
+        return bool(self.cmd_items())
+
+    # ---------- صفحه‌ی مشتری ----------
+    def cmds_pages(self):
+        """صفحه‌های راهنمای مشتری؛ هر صفحه زیر CM_MSG_LIMIT حرف.
+
+        لیست خالی → [] (یعنی دکمه و پیامی هم نمی‌رود).
+        """
+        items = self.cmd_items()
+        if not items:
+            return []
+        intro = str(self.cfg.get("cmd_intro") or "").strip()
+        head = ("📋 <b>دستورات آماده</b>\n" + self.LINE + "\n"
+                + (self._esc(intro) + "\n" + self.LINE + "\n" if intro else "")
+                + "به‌ترتیب زیر برو جلو؛ روی هر دستور یک لمس بزن تا کپی شود و "
+                  "در <b>Saved Messages</b> اکانتت بفرست.\n")
+        pages, cur, n = [], head, 0
+        for i, it in enumerate(items, 1):
+            blk = "\n<b>%s) %s</b>\n" % (_fa_digits(i),
+                                         self._esc(it["title"]) or "—")
+            if it["cmd"]:
+                blk += "<code>%s</code>\n" % self._esc(it["cmd"])
+            if it["note"]:
+                blk += "<i>%s</i>\n" % self._esc(it["note"])
+            # n>0 یعنی این صفحه چیزی دارد؛ پس شکستن همیشه جلو می‌رود و
+            # یک موردِ خیلی بلند هم هرگز حلقه‌ی بی‌پایان نمی‌سازد.
+            if n and len(cur) + len(blk) > self.CM_MSG_LIMIT:
+                pages.append(cur)
+                cur = ("📋 <b>دستورات آماده</b> — ادامه (%s)\n%s\n"
+                       % (_fa_digits(len(pages) + 1), self.LINE))
+                n = 0
+            cur += blk
+            n += 1
+        if n:
+            pages.append(cur)
+        return pages
+
+    async def send_cmds(self, uid, back=True):
+        """فرستادن راهنما به مشتری؛ اگر بلند بود به چند پیام شکسته می‌شود."""
+        pages = self.cmds_pages()
+        if not pages:
+            return False
+        last = len(pages) - 1
+        for i, p in enumerate(pages):
+            await self.say(uid, p, [back_btn("m:home")] if (back and i == last)
+                           else None, key="cmds:%d:%d" % (i, len(pages)))
+        return True
+
+    # ---------- صفحه‌های مدیر ----------
+    def cm_list_view(self):
+        items = self.cmd_items()
+        txt = ["📋 <b>دستورات آماده</b>", self.LINE,
+               "مرحله‌هایی که مشتری بعد از راه‌اندازی سلف می‌بیند. هر مورد سه "
+               "بخش دارد: <b>عنوان</b>، <b>دستور</b> و <b>توضیح ساده</b>.",
+               "دستور داخل <code>&lt;code&gt;</code> می‌رود تا مشتری با یک لمس "
+               "کپی‌اش کند.", ""]
+        if items:
+            txt.append("<b>%s دستور ثبت شده:</b>" % _fa_digits(len(items)))
+            for i, it in enumerate(items):
+                lbl = self._esc(it["title"] or it["cmd"])
+                txt.append("%s) %s — <code>%s</code>"
+                           % (_fa_digits(i + 1), lbl, self._esc(it["cmd"])))
+        else:
+            txt.append("⚪ هنوز دستوری ثبت نکرده‌ای؛ مشتری دکمه‌ی "
+                       "«📋 دستورات آماده» را نمی‌بیند.")
+            txt.append("«⚡️ پیشنهادِ شروع» پنج دستور آماده از راهنمای خودِ سلف "
+                       "می‌گذارد، یا خودت «➕ افزودن دستور» را بزن.")
+        kb, row = [], []
+        for i, it in enumerate(items):
+            lbl = (it["title"] or it["cmd"] or "—")
+            row.append(B("%s. %s" % (_fa_digits(i + 1), lbl)[:38],
+                         "a:cme:%d" % i, "primary"))
+            if len(row) == 2:
+                kb.append(row)
+                row = []
+        if row:
+            kb.append(row)
+        add = [B("➕ افزودن دستور", "a:cmi", "success")]
+        if not items:
+            add.append(B("⚡️ پیشنهادِ شروع", "a:cmx", "success"))
+        kb.append(add)
+        kb.append([B("📝 متن بالای صفحه", "a:cme:intro"),
+                   B("👁 پیش‌نمایش", "a:cm:prev", "primary")])
+        kb.append(back_btn("a:home"))
+        return "\n".join(txt), kb
+
+    def cm_item_view(self, i):
+        items = self.cmd_items()
+        if not (0 <= i < len(items)):
+            return None
+        it = items[i]
+        txt = "\n".join([
+            "📋 <b>%s</b>" % (self._esc(it["title"]) or "—"), self.LINE,
+            "🔢 جایگاه: %s از %s" % (_fa_digits(i + 1), _fa_digits(len(items))),
+            "✏️ عنوان: %s" % (self._esc(it["title"]) or "<i>خالی</i>"),
+            "⌨️ دستور: %s" % ("<code>%s</code>" % self._esc(it["cmd"])
+                             if it["cmd"] else "<i>خالی</i>"),
+            "📄 توضیح: %s" % (self._esc(it["note"]) or "<i>خالی</i>"),
+        ])
+        kb = [[B("✏️ عنوان", "a:cme:%d:t" % i), B("⌨️ دستور", "a:cme:%d:c" % i)],
+              [B("📄 توضیح", "a:cme:%d:n" % i)],
+              [B("⬆️ بالا", "a:cmu:%d:u" % i), B("⬇️ پایین", "a:cmu:%d:d" % i)],
+              [B("🗑 حذف", "a:cmd:%d" % i, "danger")],
+              back_btn("a:cm")]
+        return txt, kb
+
+    CM_FIELDS = (("t", "title", "✏️ عنوان", "عنوان این مرحله (کوتاه)"),
+                 ("c", "cmd", "⌨️ دستور", "دستوری که مشتری باید بفرستد"),
+                 ("n", "note", "📄 توضیح", "یک توضیح ساده برای مشتری"))
+
+    def cm_field(self, code):
+        for f in self.CM_FIELDS:
+            if f[0] == code:
+                return f
+        return None
+
+    def cm_edit_prompt(self, i, code):
+        """متنِ صفحه‌ی «این فیلد را عوض کن»؛ اگر مورد نبود None."""
+        f = self.cm_field(code)
+        items = self.cmd_items()
+        if not f or not (0 <= i < len(items)):
+            return None
+        cur = items[i].get(f[1]) or ""
+        txt = "\n".join([
+            "%s <b>%s</b>" % (f[2], self._esc(items[i]["title"] or items[i]["cmd"])),
+            self.LINE,
+            "%s را بفرست." % f[3],
+            "فعلی: %s" % (("<code>%s</code>" % self._esc(cur)) if cur
+                          else "<i>خالی</i>"),
+            "",
+            "خالی‌کردن: بنویس <code>-</code>",
+            "<i>/cancel برای لغو</i>",
+        ])
+        return txt, [[B("⬅️ بازگشت", "a:cme:%d" % i)]]
+
+    def cm_del_view(self, i):
+        items = self.cmd_items()
+        if not (0 <= i < len(items)):
+            return None
+        it = items[i]
+        txt = "\n".join(x for x in [
+            "🗑 <b>حذف دستور</b>", self.LINE,
+            "«%s» برای همیشه پاک شود؟" % self._esc(it["title"] or it["cmd"] or "—"),
+            ("<code>%s</code>" % self._esc(it["cmd"])) if it["cmd"] else "",
+        ] if x)
+        kb = [[B("✅ بله، پاک شود", "a:cmd:%d:y" % i, "danger")],
+              [B("↩️ نه، برگرد", "a:cme:%d" % i)],
+              back_btn("a:cm")]
+        return txt, kb
+
+    def cm_starter_view(self):
+        txt = ["⚡️ <b>پیشنهادِ شروع</b>", self.LINE,
+               "این پنج دستور از راهنمای خودِ سلف آمده‌اند و برای شروع "
+               "کافی‌اند؛ بعداً هرکدام را می‌توانی عوض کنی یا حذف کنی.", ""]
+        for i, (title, cmd, note) in enumerate(self.CMD_STARTER, 1):
+            txt.append("<b>%s) %s</b> — <code>%s</code>\n<i>%s</i>"
+                       % (_fa_digits(i), self._esc(title), self._esc(cmd),
+                          self._esc(note)))
+        kb = [[B("✅ همین‌ها را بگذار", "a:cmxy", "success")]]
+        if self.cmd_items():
+            txt.append("\n⚠️ لیست خالی نیست؛ این کار جایگزینش نمی‌کند.")
+        kb.append(back_btn("a:cm"))
+        return "\n".join(txt), kb
+
+    def cm_intro_view(self):
+        cur = str(self.cfg.get("cmd_intro") or "").strip()
+        txt = "\n".join([
+            "📝 <b>متن بالای صفحه</b>", self.LINE,
+            "این متن اولِ «📋 دستورات آماده» مشتری می‌آید؛ مثلاً یک جمله "
+            "درباره‌ی اینکه این دستورها را در Saved Messages بفرستد.",
+            "",
+            "فعلی: %s" % (self._esc(cur) if cur else "<i>خالی</i>"),
+            "",
+            "متن جدید را بفرست؛ برای خالی‌کردن بنویس <code>-</code>",
+            "<i>/cancel برای لغو</i>",
+        ])
+        return txt, [back_btn("a:cm")]
 
     def has_sub(self, uid):
         """اشتراک پولی فعال دارد؟"""
@@ -4381,7 +4621,8 @@ class Manager:
                                              "sec_set", "sec_name", "sec_emoji",
                                              "sec_delay", "sec_note", "sec_btn_url",
                                              "sec_btn_label", "sec_text", "tut_wait",
-                                             "rt_set"):
+                                             "rt_set",
+                                             "cm_add", "cm_edit", "cm_intro"):
             keep = data in ("wq:0", "kc:x", "a:tut_done") \
                 or data.startswith(("a:sec_done",)) or (
                 st_now.get("step") in ("verify_phone", "verify_referral") and data.startswith(("ko:", "o:", "wq:", "kc:", "kp:")))
@@ -4402,7 +4643,8 @@ class Manager:
                                    main_menu(adm, self.cfg["shop_on"], self.cfg["points_on"],
                                    bool((self.db.get(uid) or {}).get("session")),
                                    self.sup.is_running(uid),
-                                   self.trial_available(uid)))
+                                   self.trial_available(uid),
+                                   has_cmds=self.has_cmds()))
         if not adm and not data.startswith("a:") and data != "m:home":
             if await self.enforce_join(uid, ev=ev, chat=ev.chat_id):
                 await ans("اول عضو شو")
@@ -4417,7 +4659,8 @@ class Manager:
                                    main_menu(adm, self.cfg["shop_on"], self.cfg["points_on"],
                                    bool((self.db.get(uid) or {}).get("session")),
                                    self.sup.is_running(uid),
-                                   self.trial_available(uid)))
+                                   self.trial_available(uid),
+                                   has_cmds=self.has_cmds()))
 
         if data == "m:trial":
             await ans()
@@ -4434,6 +4677,16 @@ class Manager:
         if data == "m:tut":
             await ans("در حال ارسال…")
             return await self.send_tutorial(uid)
+
+        # 📋 دستورات آماده — راهنمای مرحله‌به‌مرحله‌ی فعال‌سازی سلف
+        if data == "m:cmds":
+            if not self.has_cmds():
+                await ans("فعلاً دستوری ثبت نشده")
+                return await self.edit(ev, "این بخش فعلاً خالی است.",
+                                       [back_btn("m:home")])
+            await ans("در حال ارسال…")
+            await self.send_cmds(uid)
+            return
 
         # تگِ یک بخش آموزش: کاربر دکمه را می‌زند → همان بخش برایش می‌رود
         if data.startswith("tut:s:"):
@@ -5119,6 +5372,129 @@ class Manager:
                     txt, kb = self.rt_item_view(r)
                     return await self.edit(ev,
                         "♻️ برگشت به پیش‌فرض.\n\n" + txt, kb)
+            # ── 📋 دستورات آماده (a:cm*) ──
+            if k == "cm":
+                txt, kb = self.cm_list_view()
+                return await self.edit(ev, txt, kb)
+            if k == "cm:prev":
+                pages = self.cmds_pages()
+                if not pages:
+                    return await self.edit(ev,
+                        "👁 <b>پیش‌نمایش</b>\n%s\n\n"
+                        "⚪ چیزی برای نمایش نیست؛ اول یک دستور ثبت کن."
+                        % self.LINE, [back_btn("a:cm")])
+                await self.say(uid,
+                    "👁 <b>پیش‌نمایش</b> — مشتری همین را می‌بیند "
+                    "(%s پیام):" % _fa_digits(len(pages)),
+                    [[B("⬅️ بازگشت", "a:cm")]])
+                await self.send_cmds(uid)
+                return
+            if k == "cmi":
+                if len(self.cmd_items()) >= self.CM_MAX:
+                    return await self.edit(ev,
+                        "سقف لیست %s دستور است؛ اول چندتا را پاک کن."
+                        % _fa_digits(self.CM_MAX), [back_btn("a:cm")])
+                self.fsm[uid] = {"step": "cm_add", "n": 1, "d": {}}
+                return await self.edit(ev,
+                    "➕ <b>افزودن دستور</b> — قدم ۱ از ۳\n%s\n"
+                    "<b>عنوان</b> این مرحله را بفرست؛ مثل «پنل» یا «کانال».\n\n"
+                    "<i>/cancel برای لغو</i>" % self.LINE,
+                    [back_btn("a:cm")])
+            if k == "cmxy":
+                items = [dict(zip(("title", "cmd", "note"), s))
+                         for s in self.CMD_STARTER]
+                self.cmd_save(items)
+                self.db.log(uid, "cm_starter", str(len(items)))
+                txt, kb = self.cm_list_view()
+                return await self.edit(ev,
+                    "⚡️ %s دستورِ پیشنهادی ثبت شد. حالا هرکدام را می‌توانی "
+                    "عوض کنی یا حذف کنی.\n\n%s" % (_fa_digits(len(items)), txt), kb)
+            if k == "cmx":
+                txt, kb = self.cm_starter_view()
+                return await self.edit(ev, txt, kb)
+            if k.startswith("cme:"):
+                rest = k[4:]
+                if rest == "intro":
+                    self.fsm[uid] = {"step": "cm_intro"}
+                    txt, kb = self.cm_intro_view()
+                    return await self.edit(ev, txt, kb)
+                parts = rest.split(":")
+                try:
+                    i = int(parts[0])
+                except (TypeError, ValueError):
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                items = self.cmd_items()
+                if not (0 <= i < len(items)):
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                if len(parts) == 1:
+                    got = self.cm_item_view(i)
+                    if not got:
+                        return await self.edit(ev, "این مورد پیدا نشد.",
+                                               [back_btn("a:cm")])
+                    txt, kb = got
+                    return await self.edit(ev, txt, kb)
+                f = self.cm_field(parts[1])
+                if not f:
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                self.fsm[uid] = {"step": "cm_edit", "idx": i, "f": f[0]}
+                got = self.cm_edit_prompt(i, f[0])
+                if not got:
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                txt, kb = got
+                return await self.edit(ev, txt, kb)
+            if k.startswith("cmu:"):
+                parts = k[4:].split(":")
+                try:
+                    i = int(parts[0])
+                except (TypeError, ValueError):
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                items = self.cmd_items()
+                j = i - 1 if len(parts) > 1 and parts[1] == "u" else i + 1
+                if not (0 <= i < len(items)) or not (0 <= j < len(items)):
+                    got = self.cm_item_view(i) if 0 <= i < len(items) else None
+                    if not got:
+                        return await self.edit(ev, "جابه‌جایی ممکن نیست؛ "
+                                                   "همین‌جا اول یا آخر است.",
+                                               [back_btn("a:cm")])
+                    txt, kb = got
+                    return await self.edit(ev, txt, kb)
+                items[i], items[j] = items[j], items[i]
+                self.cmd_save(items)
+                self.db.log(uid, "cm_move", "%d->%d" % (i, j))
+                got = self.cm_item_view(j)
+                txt, kb = got if got else self.cm_list_view()
+                return await self.edit(ev, txt, kb)
+            if k.startswith("cmd:"):
+                parts = k[4:].split(":")
+                try:
+                    i = int(parts[0])
+                except (TypeError, ValueError):
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                items = self.cmd_items()
+                if not (0 <= i < len(items)):
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                if len(parts) > 1 and parts[1] == "y":
+                    gone = items.pop(i)
+                    self.cmd_save(items)
+                    self.db.log(uid, "cm_del", gone.get("cmd") or gone.get("title"))
+                    txt, kb = self.cm_list_view()
+                    return await self.edit(ev,
+                        "🗑 «%s» پاک شد.\n\n%s"
+                        % (self._esc(gone.get("title") or gone.get("cmd") or "—"),
+                           txt), kb)
+                got = self.cm_del_view(i)
+                if not got:
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:cm")])
+                txt, kb = got
+                return await self.edit(ev, txt, kb)
             if k == "welcome":
                 self.fsm[uid] = {"step": "welcome_set"}
                 cur = self.cfg.get("welcome") or "تنظیم نشده"
@@ -6482,7 +6858,8 @@ class Manager:
                                             self.cfg["points_on"],
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
-                                   self.trial_available(uid)))
+                                   self.trial_available(uid),
+                                   has_cmds=self.has_cmds()))
 
         if cmd == "trial":
             return await self.start_trial(uid, chat)
@@ -6505,7 +6882,8 @@ class Manager:
                                             self.cfg["points_on"],
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
-                                   self.trial_available(uid)))
+                                   self.trial_available(uid),
+                                   has_cmds=self.has_cmds()))
 
         if cmd == "setup":
             return await self.setup_start(uid, chat)
@@ -6603,7 +6981,8 @@ class Manager:
                                   main_menu(True, self.cfg["shop_on"], self.cfg["points_on"],
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
-                                   self.trial_available(uid)))
+                                   self.trial_available(uid),
+                                   has_cmds=self.has_cmds()))
 
         if cmd == "stats":
             cnt = self.db.counts()
@@ -9598,7 +9977,8 @@ class Manager:
                                                 self.cfg["points_on"],
                                                 bool((self.db.get(uid) or {}).get("session")),
                                                 self.sup.is_running(uid),
-                                   self.trial_available(uid)))
+                                   self.trial_available(uid),
+                                   has_cmds=self.has_cmds()))
 
             ev_phone, _oid = event_phone(ev)
             if (not self.is_admin(uid)
@@ -9868,7 +10248,7 @@ class Manager:
                     r = self.rt_find(st0.get("rt_id"))
                     if not r:
                         return await self.say(ev.chat_id, "این مورد پیدا نشد.",
-                                              [[B("📋 دستورات آماده", "a:rt", "primary")]])
+                                              [[B("📝 متن‌های ربات", "a:rt", "primary")]])
                     if text.strip().lower() in self.RT_CLEAR_WORDS:
                         val = ""
                     else:
@@ -9879,7 +10259,106 @@ class Manager:
                         (f"✅ {r[2]} ذخیره شد." if val else
                          f"✅ {r[2]} به پیش‌فرض برگشت."),
                         [[B(f"{r[1]} {r[2]}", f"a:rt:{r[0]}", "primary")],
-                         [B("📋 دستورات آماده", "a:rt", "success")]])
+                         [B("📝 متن‌های ربات", "a:rt", "success")]])
+
+                # ── 📋 دستورات آماده: افزودنِ سه‌قدمی ──
+                if stp == "cm_add" and self.is_admin(uid):
+                    val = text.strip()
+                    d = dict(st0.get("d") or {})
+                    n = int(st0.get("n") or 1)
+                    if n == 1:
+                        if not val:
+                            return await self.say(ev.chat_id,
+                                "عنوان خالی نمی‌شود؛ یک عنوان بفرست "
+                                "یا /cancel بزن.",
+                                [[B("⬅️ بازگشت", "a:cm")]])
+                        d["title"] = val[:80]
+                        self.fsm[uid] = {"step": "cm_add", "n": 2, "d": d}
+                        return await self.say(ev.chat_id,
+                            "➕ <b>افزودن دستور</b> — قدم ۲ از ۳\n%s\n"
+                            "عنوان: <b>%s</b>\n\n"
+                            "حالا <b>دستور</b> را بفرست؛ مثل "
+                            "<code>.panel</code> یا "
+                            "<code>کانال @channel</code>.\n\n"
+                            "<i>/cancel برای لغو</i>"
+                            % (self.LINE, self._esc(d["title"])),
+                            [[B("⬅️ بازگشت", "a:cm")]])
+                    if n == 2:
+                        if not val:
+                            return await self.say(ev.chat_id,
+                                "دستور خالی نمی‌شود؛ دستور را بفرست "
+                                "یا /cancel بزن.",
+                                [[B("⬅️ بازگشت", "a:cm")]])
+                        d["cmd"] = val[:200]
+                        self.fsm[uid] = {"step": "cm_add", "n": 3, "d": d}
+                        return await self.say(ev.chat_id,
+                            "➕ <b>افزودن دستور</b> — قدم ۳ از ۳\n%s\n"
+                            "عنوان: <b>%s</b>\n"
+                            "دستور: <code>%s</code>\n\n"
+                            "یک <b>توضیح ساده</b> بفرست، یا <code>-</code> "
+                            "بفرست تا بدون توضیح ثبت شود.\n\n"
+                            "<i>/cancel برای لغو</i>"
+                            % (self.LINE, self._esc(d["title"]),
+                               self._esc(d["cmd"])),
+                            [[B("⬅️ بازگشت", "a:cm")]])
+                    # n == 3 → توضیح (قابل رد شدن)
+                    d["note"] = "" if val in ("-", "—", "خالی", "رد", "بیخیال") \
+                        else val[:300]
+                    self.fsm.pop(uid, None)
+                    items = self.cmd_items()
+                    items.append({"title": d.get("title") or "",
+                                  "cmd": d.get("cmd") or "",
+                                  "note": d.get("note") or ""})
+                    self.cmd_save(items)
+                    self.db.log(uid, "cm_add", d.get("cmd") or d.get("title"))
+                    return await self.say(ev.chat_id,
+                        "✅ دستور «%s» ثبت شد (%s از %s).\n"
+                        "مشتری همین را داخل <code>&lt;code&gt;</code> می‌بیند و "
+                        "با یک لمس کپی می‌کند."
+                        % (self._esc(d.get("title") or d.get("cmd") or "—"),
+                           _fa_digits(len(items)), _fa_digits(len(items))),
+                        [[B("📋 دستورهای ثبت‌شده", "a:cm", "primary")],
+                         [B("👁 پیش‌نمایش", "a:cm:prev")],
+                         [B("➕ افزودن دستور", "a:cmi", "success")]])
+
+                # ── ویرایشِ یک فیلد از یک دستور ──
+                if stp == "cm_edit" and self.is_admin(uid):
+                    self.fsm.pop(uid, None)
+                    i = int(st0.get("idx") or 0)
+                    f = self.cm_field(st0.get("f"))
+                    items = self.cmd_items()
+                    if not f or not (0 <= i < len(items)):
+                        return await self.say(ev.chat_id, "این مورد پیدا نشد.",
+                                              [[B("📋 دستورات آماده", "a:cm",
+                                                 "primary")]])
+                    val = text.strip()
+                    items[i][f[1]] = "" if val in ("-", "—", "خالی", "پاک",
+                                                   "حذف") else val[:300]
+                    if not (items[i]["title"] or items[i]["cmd"]):
+                        return await self.say(ev.chat_id,
+                            "عنوان و دستور با هم خالی نمی‌شوند؛ این مورد "
+                            "عوض نشد.", [[B("⬅️ بازگشت", "a:cme:%d" % i)]])
+                    self.cmd_save(items)
+                    self.db.log(uid, "cm_edit", "%d:%s" % (i, f[1]))
+                    return await self.say(ev.chat_id,
+                        "✅ %s ذخیره شد." % f[2],
+                        [[B("📋 %s" % (items[i]["title"] or items[i]["cmd"]),
+                           "a:cme:%d" % i, "primary")],
+                         [B("📋 دستورات آماده", "a:cm", "success")]])
+
+                # ── متنِ بالای صفحه ──
+                if stp == "cm_intro" and self.is_admin(uid):
+                    self.fsm.pop(uid, None)
+                    val = text.strip()
+                    self.cfg["cmd_intro"] = "" if val in ("-", "—", "خالی",
+                                                          "پاک", "حذف",
+                                                          "پیش‌فرض") else val[:600]
+                    self.db.log(uid, "cm_intro", str(len(self.cfg["cmd_intro"])))
+                    return await self.say(ev.chat_id,
+                        "✅ متن بالای صفحه ذخیره شد." if self.cfg["cmd_intro"]
+                        else "✅ متن بالای صفحه خالی شد.",
+                        [[B("👁 پیش‌نمایش", "a:cm:prev", "primary")],
+                         [B("📋 دستورات آماده", "a:cm", "success")]])
 
                 if stp == "welcome_set" and self.is_admin(uid):
                     self.fsm.pop(uid, None)
@@ -10080,7 +10559,8 @@ class Manager:
                               self.cfg["points_on"],
                               bool((self.db.get(uid) or {}).get("session")),
                               self.sup.is_running(uid),
-                                   self.trial_available(uid)))
+                                   self.trial_available(uid),
+                                   has_cmds=self.has_cmds()))
 
             if not text.startswith("/"):
                 return await self.say(ev.chat_id, "/help را بزن.")
