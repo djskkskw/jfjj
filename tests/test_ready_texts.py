@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""سلامِ منوی اصلی با ساعت ایران + بخش «📋 دستورات آماده» در پنل مدیر.
+"""سلامِ منوی اصلی با ساعت ایران + «📝 متن‌های ربات» + «📋 دستورات آماده».
 
   1. سرورِ هاست روی UTC است؛ سلام باید طبق Asia/Tehran انتخاب شود
      (قبلاً ظهر روی «صبح» و شب روی «ظهر» می‌ماند).
-  2. مدیر از «📋 دستورات آماده» متن‌ها و جمله‌های سلام را تنظیم و
+  2. مدیر از «📝 متن‌های ربات» متن‌ها و جمله‌های سلام را تنظیم و
      به پیش‌فرض برمی‌گرداند؛ {name} جای اسم مشتری است.
+  3. مدیر از «📋 دستورات آماده» راهنمای مرحله‌به‌مرحله‌ی فعال‌سازی سلف را
+     ثبت می‌کند (عنوان/دستور/توضیح) و مشتری آن را شماره‌دار با <code>
+     می‌بیند تا با یک لمس کپی شود.
 """
 import os
 import shutil
@@ -310,14 +313,14 @@ INNER = textwrap.dedent('''
                   and m.greet_key(21) == "greet_night" and m.greet_key(4) == "greet_night",
                   "greeting slot boundaries")
 
-            # ---------- 2) پنل «📋 دستورات آماده» ----------
-            check('"a:rt"' in src, "admin menu has the 📋 دستورات آماده button")
+            # ---------- 2) پنل «📝 متن‌های ربات» ----------
+            check('"a:rt"' in src, "admin menu has the 📝 متن‌های ربات button")
             check("a:rt" in btn_datas(M.admin_menu()), "admin_menu() exposes a:rt")
             ev = await cb(ADMIN, "a:rt")
             datas = btn_datas(ev.edits[-1][1])
             check(all(f"a:rt:{r[0]}" in datas for r in M.Manager.READY_TEXTS),
                   "list page has a button per text")
-            check("دستورات آماده" in ev.edits[-1][0], "list page titled دستورات آماده")
+            check("متن‌های ربات" in ev.edits[-1][0], "list page titled متن‌های ربات")
 
             # پیام‌هایِ متنیِ مدیر با هندلر واقعی
             block_start = src.index("@self.bot.on(events.NewMessage(incoming=True))")
@@ -393,15 +396,196 @@ INNER = textwrap.dedent('''
 
             # غیرمدیر راهی ندارد
             ev = await cb(USER, "a:rt")
-            check(not any("دستورات آماده" in (e[0] or "") for e in ev.edits),
-                  "non-admin cannot open the page")
+            check(not any("متن‌های ربات" in (e[0] or "") for e in ev.edits),
+                  "non-admin cannot open the text panel")
 
             # رفتن به صفحه‌ی دیگر مرحله‌ی نیمه‌کاره را لغو می‌کند
             ev = await cb(ADMIN, "a:rte:contact")
             ev = await cb(ADMIN, "m:home")
             check(ADMIN not in m.fsm, "any other button cancels rt_set")
 
-            # ---------- 3) fallback منطقه‌زمانی ----------
+            # ---------- 3) «📋 دستورات آماده» (a:cm*) ----------
+            check('"a:cm"' in src, "admin menu has the 📋 دستورات آماده button")
+            check("a:cm" in btn_datas(M.admin_menu()), "admin_menu() exposes a:cm")
+            check('B("📋 دستورات آماده", "m:cmds", "success")' in src,
+                  "menu and the sold message both wire m:cmds")
+
+            # لیستِ خالی
+            check(m.cmd_items() == [] and not m.has_cmds(), "cmd_items starts empty")
+            check("m:cmds" not in btn_datas(M.main_menu(False, True, True,
+                                                        False, False, True)),
+                  "main menu hides m:cmds while nothing is registered")
+            ev = await cb(ADMIN, "a:cm")
+            d = btn_datas(ev.edits[-1][1])
+            check("a:cmi" in d and "a:cmx" in d and "a:cme:intro" in d
+                  and "a:cm:prev" in d,
+                  "empty list offers add / starter / intro / preview")
+            check("⚪" in ev.edits[-1][0], "empty list says nothing is registered")
+            ev = await cb(ADMIN, "a:cm:prev")
+            check("چیزی برای نمایش نیست" in ev.edits[-1][0],
+                  "preview of an empty list is explained")
+
+            # «⚡️ پیشنهادِ شروع» — پنج دستور از راهنمای خودِ سلف
+            starter = M.Manager.CMD_STARTER
+            check(len(starter) == 5, "starter suggestion has five commands")
+            check({c[1] for c in starter} == {".panel", "کانال @channel",
+                                              "افزودن گروه @group",
+                                              "تبادل روشن", "راهنما"},
+                  "starter = panel / channel / group / exchange-on / help")
+            ev = await cb(ADMIN, "a:cmx")
+            check(all(c[1] in ev.edits[-1][0] for c in starter),
+                  "starter page lists every preset command")
+            ev = await cb(ADMIN, "a:cmxy")
+            check([i["cmd"] for i in m.cmd_items()] == [c[1] for c in starter],
+                  "starter applied to cfg[cmd_items] in order")
+            with open(M.CONFIG_FILE, encoding="utf-8") as f:
+                check(len(json.load(f)["cmd_items"]) == 5,
+                      "cmd_items persisted to manager_config.json")
+            ev = await cb(ADMIN, "a:cm")
+            check("a:cmx" not in btn_datas(ev.edits[-1][1])
+                  and "a:cmi" in btn_datas(ev.edits[-1][1]),
+                  "starter button only shows while the list is empty")
+
+            # افزودنِ سه‌قدمی: عنوان → دستور → توضیح
+            ev = await cb(ADMIN, "a:cmi")
+            check((m.fsm.get(ADMIN) or {}).get("step") == "cm_add"
+                  and m.fsm[ADMIN]["n"] == 1, "add starts at step 1")
+            check("قدم ۱ از ۳" in ev.edits[-1][0], "step 1 asks for the title")
+            await handler(FakeMsgEv(ADMIN, 920, "عنوان تست"))
+            check(m.fsm[ADMIN]["n"] == 2 and "قدم ۲ از ۳" in bot.text_sends[-1][1],
+                  "step 2 asks for the command")
+            await handler(FakeMsgEv(ADMIN, 921, ".test"))
+            check(m.fsm[ADMIN]["n"] == 3 and "قدم ۳ از ۳" in bot.text_sends[-1][1],
+                  "step 3 asks for the note")
+            await handler(FakeMsgEv(ADMIN, 922, "-"))
+            check(ADMIN not in m.fsm, "step finished after the third answer")
+            check(m.cmd_items()[-1] == {"title": "عنوان تست", "cmd": ".test",
+                                        "note": ""},
+                  "3-step add appended the command («-» skips the note)")
+            check(len(m.cmd_items()) == 6, "list grew to six items")
+
+            # توضیح هم ذخیره می‌شود
+            ev = await cb(ADMIN, "a:cmi")
+            await handler(FakeMsgEv(ADMIN, 923, "با توضیح"))
+            await handler(FakeMsgEv(ADMIN, 924, ".note"))
+            await handler(FakeMsgEv(ADMIN, 925, "یک توضیح ساده"))
+            check(m.cmd_items()[-1]["note"] == "یک توضیح ساده", "note stored")
+
+            # ویرایشِ هر فیلد
+            ev = await cb(ADMIN, "a:cme:6")
+            d = btn_datas(ev.edits[-1][1])
+            check("a:cme:6:t" in d and "a:cme:6:c" in d and "a:cme:6:n" in d
+                  and "a:cmu:6:u" in d and "a:cmu:6:d" in d and "a:cmd:6" in d,
+                  "item page offers each field, both moves and delete")
+            check("جایگاه" in ev.edits[-1][0], "item page shows the position")
+            for code, field, val in (("t", "title", "عنوانِ عوض‌شده"),
+                                     ("c", "cmd", ".edited"),
+                                     ("n", "note", "توضیحِ عوض‌شده")):
+                ev = await cb(ADMIN, "a:cme:6:%s" % code)
+                check((m.fsm.get(ADMIN) or {}).get("step") == "cm_edit"
+                      and m.fsm[ADMIN]["idx"] == 6 and m.fsm[ADMIN]["f"] == code,
+                      "field %s starts cm_edit" % code)
+                await handler(FakeMsgEv(ADMIN, 930, val))
+                check(ADMIN not in m.fsm, "cm_edit finished for %s" % code)
+                check(m.cmd_items()[6][field] == val, "%s field updated" % field)
+
+            # جابه‌جایی با ⬆️⬇️
+            ev = await cb(ADMIN, "a:cmu:6:u")
+            check(m.cmd_items()[5]["cmd"] == ".edited", "⬆️ moved the item up")
+            ev = await cb(ADMIN, "a:cmu:5:d")
+            check(m.cmd_items()[6]["cmd"] == ".edited", "⬇️ moved it back down")
+            frozen = m.cmd_items()
+            ev = await cb(ADMIN, "a:cmu:0:u")
+            check(m.cmd_items() == frozen, "cannot move past the top")
+            ev = await cb(ADMIN, "a:cmu:99:d")
+            check(m.cmd_items() == frozen, "out-of-range move is ignored")
+
+            # حذف با تأیید
+            ev = await cb(ADMIN, "a:cmd:6")
+            check("a:cmd:6:y" in btn_datas(ev.edits[-1][1])
+                  and m.cmd_items()[6]["cmd"] == ".edited",
+                  "delete asks for confirmation first")
+            ev = await cb(ADMIN, "a:cmd:6:y")
+            check(len(m.cmd_items()) == 6
+                  and all(i["cmd"] != ".edited" for i in m.cmd_items()),
+                  "confirmed delete removed the item")
+
+            # متنِ بالای صفحه
+            ev = await cb(ADMIN, "a:cme:intro")
+            check((m.fsm.get(ADMIN) or {}).get("step") == "cm_intro",
+                  "intro button starts cm_intro")
+            await handler(FakeMsgEv(ADMIN, 940, "اینها را در Saved Messages بفرست."))
+            check(m.cfg["cmd_intro"] == "اینها را در Saved Messages بفرست.",
+                  "intro saved to cfg[cmd_intro]")
+            with open(M.CONFIG_FILE, encoding="utf-8") as f:
+                check(json.load(f)["cmd_intro"].startswith("اینها"),
+                      "cmd_intro persisted")
+
+            # ---------- نمای مشتری ----------
+            check("m:cmds" in btn_datas(M.main_menu(False, True, True, False,
+                                                    False, True, has_cmds=True)),
+                  "main menu shows m:cmds once commands exist")
+            pages = m.cmds_pages()
+            check(len(pages) == 1, "six short commands fit in one message")
+            check(all(("<code>%s</code>" % M.Manager._esc(i["cmd"])) in pages[0]
+                      for i in m.cmd_items()),
+                  "every command is inside <code> for one-tap copy")
+            check(all(("%d)" % n) in pages[0] for n in range(1, 7)),
+                  "steps are numbered")
+            check("اینها را در Saved Messages بفرست." in pages[0],
+                  "intro text sits at the top of the customer page")
+            bot.text_sends.clear()
+            ev = await cb(USER, "m:cmds")
+            check(len(bot.text_sends) == 1 and bot.text_sends[0][0] == USER,
+                  "m:cmds sends the guide to the customer")
+            check(btn_datas(bot.text_sends[-1][2].get("buttons")) == ["m:home"],
+                  "customer page carries a back button")
+
+            # متنِ بلند به چند پیام شکسته می‌شود (سقف ~۳۸۰۰ حرف)
+            keep = m.cfg.get("cmd_items")
+            m.cmd_save([{"title": "مرحله %d" % i, "cmd": ".cmd%d" % i,
+                         "note": "ت" * 300} for i in range(1, 31)])
+            pages = m.cmds_pages()
+            check(len(pages) > 1, "a long list is split into several messages")
+            check(all(len(p) <= M.Manager.CM_MSG_LIMIT for p in pages),
+                  "no page exceeds the %d-char limit" % M.Manager.CM_MSG_LIMIT)
+            check("".join(pages).count("<code>") == 30,
+                  "all 30 commands survive the split")
+            bot.text_sends.clear()
+            ev = await cb(USER, "m:cmds")
+            check(len(bot.text_sends) == len(pages), "each page is its own message")
+            check(not btn_datas(bot.text_sends[0][2].get("buttons")),
+                  "only the last page carries the back button")
+            m.cmd_save(keep)
+
+            # ورودیِ HTML امن نمایش داده می‌شود
+            m.cmd_save([{"title": "<b>x", "cmd": "<script>", "note": "a & b"}])
+            pg = m.cmds_pages()[0]
+            check("&lt;b&gt;x" in pg and "&lt;script&gt;" in pg and "a &amp; b" in pg,
+                  "customer view is HTML-escaped")
+            check("<script>" not in pg, "no raw tag reaches Telegram")
+            ev = await cb(ADMIN, "a:cm")
+            check("&lt;script&gt;" in ev.edits[-1][0], "admin list is escaped too")
+
+            # غیرمدیر راهی به پنل ندارد
+            ev = await cb(USER, "a:cm")
+            check(not ev.edits, "non-admin cannot open the commands panel")
+
+            # رفتن به صفحه‌ی دیگر مرحله‌ی نیمه‌کاره را لغو می‌کند
+            for start in ("a:cmi", "a:cme:intro", "a:cme:0:t"):
+                ev = await cb(ADMIN, start)
+                check(ADMIN in m.fsm, "%s leaves a pending step" % start)
+                ev = await cb(ADMIN, "m:home")
+                check(ADMIN not in m.fsm, "any other button cancels %s" % start)
+
+            # داده‌ی خراب در cfg نباید صفحه را بیندازد
+            m.cfg.d["cmd_items"] = ["x", None, {"title": "", "cmd": ""},
+                                    {"title": "سالم", "cmd": ".ok"}]
+            check([i["cmd"] for i in m.cmd_items()] == [".ok"],
+                  "broken cmd_items entries are dropped, valid one kept")
+            m.cmd_save(keep)
+
+            # ---------- 4) fallback منطقه‌زمانی ----------
             M.BOT_TZ_NAME = "Asia/Tehran"
             real_zi = sys.modules.get("zoneinfo")
             sys.modules["zoneinfo"] = None   # tzdata/zoneinfo در دسترس نیست
@@ -458,7 +642,7 @@ def run_inner(port):
 
 
 if __name__ == "__main__":
-    print("--- سلام با ساعت ایران + دستورات آماده ---")
+    print("--- سلام با ساعت ایران + متن‌های ربات + دستورات آماده ---")
     reset()
     out = run_inner(8174)
     checks = [ln for ln in out.splitlines() if ln.startswith("CHECK")]
