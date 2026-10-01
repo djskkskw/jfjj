@@ -90,7 +90,34 @@ def _start_health_server():
 threading.Thread(target=_start_health_server, daemon=True).start()
 # --- پایان فیکس ---
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# ساعتِ محلیِ ربات. سرورِ هاست (Render/Railway) معمولاً روی UTC است؛ با
+# datetime.now() ساعتِ ایران ۳:۳۰ عقب می‌ماند و «ظهر» روی «صبح» می‌ماند.
+# پیش‌فرض Asia/Tehran؛ با متغیر محیطی BOT_TZ قابل تغییر است (مثلاً Europe/Istanbul).
+BOT_TZ_NAME = (os.environ.get("BOT_TZ") or "Asia/Tehran").strip() or "Asia/Tehran"
+
+
+def _bot_tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(BOT_TZ_NAME)
+    except Exception:
+        # tzdata نصب نیست: ایران بدون ساعت تابستانی = UTC+03:30
+        if BOT_TZ_NAME == "Asia/Tehran":
+            return timezone(timedelta(hours=3, minutes=30))
+        return timezone.utc
+
+
+def local_now():
+    """زمان فعلی به ساعت محلیِ ربات (نه ساعت سرور)."""
+    return datetime.now(_bot_tz())
+
+
+def local_dt(ts):
+    """timestamp → datetime به ساعت محلیِ ربات."""
+    return datetime.fromtimestamp(ts, _bot_tz())
+
 
 def _fa_digits(n):
     return str(n)
@@ -1565,6 +1592,11 @@ DEFAULTS = {
     "sold_text": "",        # متن بعد از راه‌اندازی موفق
     "expired_text": "",     # متن وقتی اشتراک تمام شد
     "contact": "",          # آیدی پشتیبانی، مثل @yourid
+    # ── سلامِ بالای منوی اصلی (هر خط یک جمله؛ خالی = پیش‌فرض) ──
+    "greet_morning": "",    # ۵ تا ۱۲
+    "greet_noon": "",       # ۱۲ تا ۱۷
+    "greet_evening": "",    # ۱۷ تا ۲۱
+    "greet_night": "",      # ۲۱ تا ۵
     # ── فروشگاه ──
     "shop_on": True,
     "card_number": "",      # شماره کارت برای واریز
@@ -2575,6 +2607,7 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B("🧩 بخش‌های آموزش", "a:secs", "success")],
         [B("📝 متن خوش‌آمدگویی", "a:welcome", "primary"),
          B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
+        [B("📋 دستورات آماده", "a:rt", "success")],
         [B("📣 جوین اجباری", "a:fjoin", "danger"),
          B("📜 رویدادها", "a:mlog", "primary")],
         [B("📦 پشتیبان بگیر", "a:backup", "success"),
@@ -2989,19 +3022,127 @@ class Manager:
     # ═══════════════════════════════════════════════
     LINE = "━━━━━━━━━━━━━━━"
 
+    # ═══════════════════════════════════════════════
+    #  📋 دستورات آماده — همه‌ی متن‌های قابل‌تنظیمِ ربات یک‌جا
+    #  (id, emoji, عنوان، کلید در cfg، چندخطی؟، سقف حرف، توضیح)
+    # ═══════════════════════════════════════════════
+    READY_TEXTS = (
+        ("welcome", "📝", "متن خوش‌آمدگویی", "welcome", False, 2000,
+         "زیرِ سلامِ بالای منوی اصلیِ مشتری نمایش داده می‌شود."),
+        ("sold", "🚀", "بعد از راه‌اندازی سلف", "sold_text", False, 3500,
+         "بعد از اینکه سلفِ مشتری با موفقیت روشن شد برایش می‌رود. "
+         "خالی = متنِ پیش‌فرض (وضعیت، اعتبار و راهنمای .panel)."),
+        ("expired", "⏳", "اشتراک / سرویس غیرفعال", "expired_text", False, 2000,
+         "وقتی مشتری با سرویسِ غیرفعال یا اشتراکِ تمام‌شده کار می‌خواهد "
+         "انجام بدهد، این متن را می‌بیند."),
+        ("contact", "🎧", "آیدی پشتیبانی", "contact", False, 100,
+         "مثل @yourid — زیرِ منوی اصلی و صفحه‌ی پشتیبانی نشان داده می‌شود."),
+        ("paynote", "💳", "توضیح پرداخت", "pay_note", False, 1000,
+         "زیرِ شماره کارت در فاکتورها اضافه می‌شود."),
+        ("g_morning", "☀️", "سلام صبح (۵ تا ۱۲)", "greet_morning", True, 2000,
+         "هر خط یک جمله؛ هر بار یکی تصادفی انتخاب می‌شود."),
+        ("g_noon", "🌞", "سلام ظهر (۱۲ تا ۱۷)", "greet_noon", True, 2000,
+         "هر خط یک جمله؛ هر بار یکی تصادفی انتخاب می‌شود."),
+        ("g_evening", "🌇", "سلام عصر (۱۷ تا ۲۱)", "greet_evening", True, 2000,
+         "هر خط یک جمله؛ هر بار یکی تصادفی انتخاب می‌شود."),
+        ("g_night", "🌙", "سلام شب (۲۱ تا ۵)", "greet_night", True, 2000,
+         "هر خط یک جمله؛ هر بار یکی تصادفی انتخاب می‌شود."),
+    )
+    RT_CLEAR_WORDS = ("خاموش", "پاک", "حذف", "پیش‌فرض", "پیشفرض", "-")
+
+    def rt_find(self, rid):
+        for r in self.READY_TEXTS:
+            if r[0] == rid:
+                return r
+        return None
+
+    def rt_current(self, r):
+        """متنِ ذخیره‌شده‌ی مدیر ('' = تنظیم نشده)."""
+        return str(self.cfg.get(r[3]) or "")
+
     @staticmethod
-    def greet():
-        h = datetime.now().hour
-        if 5 <= h < 12:
-            return random.choice(["صبح بخیر ☀️", "سلام صبحت بخیر 🌤",
-                                  "صبحت پرانرژی ☕️"])
-        if 12 <= h < 17:
-            return random.choice(["سلام 👋", "ظهرت بخیر 🌞", "خسته نباشی 🙌"])
-        if 17 <= h < 21:
-            return random.choice(["عصر بخیر 🌇", "سلام عصرت بخیر 🌆",
-                                  "خوش اومدی 👋"])
-        return random.choice(["شب بخیر 🌙", "سلام شبت بخیر ✨",
-                              "بیدارِ شب‌کار 🌃"])
+    def _esc(t):
+        return (str(t).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+    def rt_clean(self, r, text):
+        """متنِ ورودیِ مدیر را برای ذخیره آماده می‌کند."""
+        text = (text or "").strip()
+        if r[4]:   # چندخطی: خط‌های خالی حذف، هر خط حداکثر ۸۰ حرف، حداکثر ۱۰ خط
+            lines = [ln.strip()[:80] for ln in text.splitlines() if ln.strip()]
+            return "\n".join(lines[:10])
+        return text[:r[5]]
+
+    def rt_list_view(self):
+        kb, row = [], []
+        for r in self.READY_TEXTS:
+            mark = "✅" if self.rt_current(r) else "⚪"
+            row.append(B(f"{mark} {r[1]} {r[2].split(' (')[0]}", f"a:rt:{r[0]}",
+                         "primary" if self.rt_current(r) else None))
+            if len(row) == 2:
+                kb.append(row)
+                row = []
+        if row:
+            kb.append(row)
+        kb.append(back_btn("a:home"))
+        txt = (f"📋 <b>دستورات آماده</b>\n{self.LINE}\n"
+               "همه‌ی متن‌هایی که ربات به مشتری می‌گوید را از همین‌جا خودت "
+               "تنظیم کن. روی هر مورد بزن، متن فعلی را ببین و عوضش کن.\n\n"
+               "✅ = متنِ خودت ثبت شده\n"
+               "⚪ = متنِ پیش‌فرض می‌رود\n\n"
+               "<i>برای سلام‌ها می‌توانی جای اسمِ مشتری را با "
+               "<code>{name}</code> مشخص کنی.</i>")
+        return txt, kb
+
+    def rt_item_view(self, r):
+        cur = self.rt_current(r)
+        t = [f"{r[1]} <b>{r[2]}</b>", self.LINE, r[6], ""]
+        if r[4]:
+            hint = ("جمله‌ی خودت را بنویس؛ برای جای اسم <code>{name}</code> "
+                    "بگذار. مثال: <code>{name} جان، ظهرت بخیر 🌞</code>")
+            opts = self.greet_options(r[3])
+            t.append("<b>جمله‌های فعلی:</b>" + ("" if cur else " <i>(پیش‌فرض)</i>"))
+            t += [f"• {self._esc(o)}" for o in opts]
+            t += ["", hint]
+        else:
+            t.append("<b>متن فعلی:</b>" + ("" if cur else " <i>تنظیم نشده (پیش‌فرض)</i>"))
+            if cur:
+                t.append(self._esc(cur[:1500]) + ("…" if len(cur) > 1500 else ""))
+        kb = [[B("✏️ تغییر متن", f"a:rte:{r[0]}", "success")]]
+        if cur:
+            kb.append([B("♻️ برگشت به پیش‌فرض", f"a:rtr:{r[0]}", "danger")])
+        kb.append(back_btn("a:rt"))
+        return "\n".join(t), kb
+
+    # پیش‌فرضِ سلام‌ها؛ مدیر از «📋 دستورات آماده» عوضشان می‌کند.
+    GREET_DEFAULTS = {
+        "greet_morning": ("صبح بخیر ☀️", "سلام صبحت بخیر 🌤", "صبحت پرانرژی ☕️"),
+        "greet_noon": ("سلام 👋", "ظهرت بخیر 🌞", "خسته نباشی 🙌"),
+        "greet_evening": ("عصر بخیر 🌇", "سلام عصرت بخیر 🌆", "خوش اومدی 👋"),
+        "greet_night": ("شب بخیر 🌙", "سلام شبت بخیر ✨", "بیدارِ شب‌کار 🌃"),
+    }
+
+    @staticmethod
+    def greet_key(hour):
+        """کلیدِ بازه‌ی روز برای ساعت محلی (۰ تا ۲۳)."""
+        if 5 <= hour < 12:
+            return "greet_morning"
+        if 12 <= hour < 17:
+            return "greet_noon"
+        if 17 <= hour < 21:
+            return "greet_evening"
+        return "greet_night"
+
+    def greet_options(self, key):
+        """جمله‌های سلام این بازه: متنِ مدیر (هر خط یکی) یا پیش‌فرض."""
+        raw = str(self.cfg.get(key) or "")
+        custom = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        return custom or list(self.GREET_DEFAULTS[key])
+
+    def greet(self, hour=None):
+        # ساعتِ محلیِ ربات (Asia/Tehran)، نه ساعتِ سرور
+        h = local_now().hour if hour is None else int(hour)
+        return random.choice(self.greet_options(self.greet_key(h)))
 
     def has_sub(self, uid):
         """اشتراک پولی فعال دارد؟"""
@@ -3171,7 +3312,13 @@ class Manager:
         c = self.db.get(uid)
         name = (c.get("name") or "").split("@")[0].strip() if c else ""
         g = self.greet()
-        hi = f"{g.split()[0]} {name} {' '.join(g.split()[1:])}" if name else g
+        if "{name}" in g:
+            # مدیر جای اسم را خودش گذاشته؛ بدون اسم، همان جا خالی می‌شود
+            hi = " ".join(g.replace("{name}", name).split())
+        elif name:
+            hi = f"{g.split()[0]} {name} {' '.join(g.split()[1:])}".strip()
+        else:
+            hi = g
         t = [f"<b>{hi}</b>", ""]
         t.append(self.cfg["welcome"] or "به پنل <b>جفج</b> خوش آمدی.")
         t += ["", self.LINE]
@@ -4233,7 +4380,8 @@ class Manager:
                                              "ok_days", "acct_n", "fjoin_add", "tut_set",
                                              "sec_set", "sec_name", "sec_emoji",
                                              "sec_delay", "sec_note", "sec_btn_url",
-                                             "sec_btn_label", "sec_text", "tut_wait"):
+                                             "sec_btn_label", "sec_text", "tut_wait",
+                                             "rt_set"):
             keep = data in ("wq:0", "kc:x", "a:tut_done") \
                 or data.startswith(("a:sec_done",)) or (
                 st_now.get("step") in ("verify_phone", "verify_referral") and data.startswith(("ko:", "o:", "wq:", "kc:", "kp:")))
@@ -4939,6 +5087,38 @@ class Manager:
                     "<code>VIP 30 0 10 7</code>  ← ۳۰٪، ۱۰ بار، ۷ روز\n\n"
                     "<i>/cancel برای لغو</i>",
                     [back_btn("a:discs")])
+            if k == "rt":
+                txt, kb = self.rt_list_view()
+                return await self.edit(ev, txt, kb)
+            if k.startswith(("rt:", "rte:", "rtr:")):
+                kind, rid = k.split(":", 1)
+                r = self.rt_find(rid)
+                if not r:
+                    return await self.edit(ev, "این مورد پیدا نشد.",
+                                           [back_btn("a:rt")])
+                if kind == "rt":
+                    txt, kb = self.rt_item_view(r)
+                    return await self.edit(ev, txt, kb)
+                if kind == "rte":
+                    self.fsm[uid] = {"step": "rt_set", "rt_id": rid}
+                    cur = self.rt_current(r)
+                    return await self.edit(ev,
+                        f"✏️ <b>{r[1]} {r[2]}</b>\n{self.LINE}\n"
+                        + ("هر خط یک جمله بفرست (حداکثر ۱۰ خط)؛ هر بار یکی "
+                           "تصادفی انتخاب می‌شود.\n"
+                           "جای اسمِ مشتری: <code>{name}</code>\n"
+                           if r[4] else
+                           "متنِ جدید را همین‌جا بفرست.\n")
+                        + ("\nبرای برگشت به پیش‌فرض بنویس: <code>پیش‌فرض</code>\n"
+                           if cur else "")
+                        + "\n<i>/cancel برای لغو</i>",
+                        [[B("⬅️ بازگشت", f"a:rt:{rid}")]])
+                if kind == "rtr":
+                    self.cfg[r[3]] = ""
+                    self.db.log(uid, "rt_reset", rid)
+                    txt, kb = self.rt_item_view(r)
+                    return await self.edit(ev,
+                        "♻️ برگشت به پیش‌فرض.\n\n" + txt, kb)
             if k == "welcome":
                 self.fsm[uid] = {"step": "welcome_set"}
                 cur = self.cfg.get("welcome") or "تنظیم نشده"
@@ -6103,7 +6283,7 @@ class Manager:
                 out.append(f"{kic.get(o.get('kind'), '💎')} #{_fa_digits(o['id'])} "
                            f"{o['plan_name']} — {money(o['final'])}")
                 out.append(f"     {ic.get(o['status'], o['status'])} • "
-                           f"{datetime.fromtimestamp(o['created_at']):%m-%d %H:%M}")
+                           f"{local_dt(o['created_at']):%m-%d %H:%M}")
                 if o["note"]:
                     out.append(f"     💬 {o['note']}")
             return await self.say(chat, "\n".join(out))
@@ -6480,7 +6660,7 @@ class Manager:
                 f"اعتبار: {human_left(c['expires_at'])}\n"
                 f"سشن: {'✅' if c['session'] else '❌'}\n"
                 f"ری‌استارت: {_fa_digits(c['restarts'] or 0)}\n"
-                f"عضویت: {datetime.fromtimestamp(c['created_at']):%Y-%m-%d}" + live)
+                f"عضویت: {local_dt(c['created_at']):%Y-%m-%d}" + live)
 
         if cmd in ("ok", "ext"):
             if not p:
@@ -6577,7 +6757,7 @@ class Manager:
             if not rows:
                 return await self.say(chat, "رویدادی نیست.")
             return await self.say(chat, "📜 <b>رویدادها</b>\n\n" + "\n".join(
-                f"<code>{datetime.fromtimestamp(r['ts']):%m-%d %H:%M}</code> "
+                f"<code>{local_dt(r['ts']):%m-%d %H:%M}</code> "
                 f"{r['uid']} {r['kind']} {(r['detail'] or '')[:30]}"
                 for r in rows))
 
@@ -6624,7 +6804,7 @@ class Manager:
                    f"کیف پول: -{money(o['wallet_used'])}\n"
                    f"<b>نهایی: {money(o['final'])}</b>\n"
                    f"وضعیت: {o['status']}\n"
-                   f"تاریخ: {datetime.fromtimestamp(o['created_at']):%Y-%m-%d %H:%M}")
+                   f"تاریخ: {local_dt(o['created_at']):%Y-%m-%d %H:%M}")
             if o["note"]:
                 txt += f"\nیادداشت: {o['note']}"
             if o["receipt_file"]:
@@ -9682,6 +9862,24 @@ class Manager:
                     ok = await self.say(tid, text)
                     return await self.say(ev.chat_id, "✅ رفت" if ok else "❌ نرسید",
                                           [[B("👤 مشتری", f"au:{tid}")]])
+
+                if stp == "rt_set" and self.is_admin(uid):
+                    self.fsm.pop(uid, None)
+                    r = self.rt_find(st0.get("rt_id"))
+                    if not r:
+                        return await self.say(ev.chat_id, "این مورد پیدا نشد.",
+                                              [[B("📋 دستورات آماده", "a:rt", "primary")]])
+                    if text.strip().lower() in self.RT_CLEAR_WORDS:
+                        val = ""
+                    else:
+                        val = self.rt_clean(r, text)
+                    self.cfg[r[3]] = val
+                    self.db.log(uid, "rt_set", f"{r[0]} {len(val)}")
+                    return await self.say(ev.chat_id,
+                        (f"✅ {r[2]} ذخیره شد." if val else
+                         f"✅ {r[2]} به پیش‌فرض برگشت."),
+                        [[B(f"{r[1]} {r[2]}", f"a:rt:{r[0]}", "primary")],
+                         [B("📋 دستورات آماده", "a:rt", "success")]])
 
                 if stp == "welcome_set" and self.is_admin(uid):
                     self.fsm.pop(uid, None)
