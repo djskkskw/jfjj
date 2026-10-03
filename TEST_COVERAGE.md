@@ -1,6 +1,6 @@
 # نقشهٔ کامل تست‌ها — چه چیزی واقعاً تست شده، چه چیزی فقط ادعا شده
 
-> جمع‌بندی: **۳۱ فایل تست / ۱۱٬۱۶۱ خط / ۱۵۷۰+ سنجه**. همه در وضعیت فعلی **سبز**.
+> جمع‌بندی: **۳۵ فایل تست / ۱۳٬۰۴۶ خط / ۱۵۷۰+ سنجه**. همه در وضعیت فعلی **سبز**.
 > اجرا: `python3 tests/test_<name>.py` (هر فایل مستقل و self-contained است؛ نیازی به pytest نیست).
 
 ---
@@ -39,12 +39,13 @@
 | `test_shutdown_cancel.py` | ۴ سناریو: `_shutdown` وسط عملیات ادعا → هشدار + await + نشانهٔ done (کنسل نرم)؛ خروج اجباریِ setup لاگین گیرکرده را می‌کشد؛ بعد از shutdown کروتن‌های لاگین نادیده گرفته می‌شوند (رگرسیون `capture_for_agent`)؛ backoff نمایی واقعی `1→2→4→8s` |
 | `test_timers.py` | `calc_checkin` با جیتر ۶ساعت+۶۰دقیقه (سقف طول شناسه)؛ `relink_checkin` ۲ ساعت؛ `renew_reminder` روزهای [۳,۱] با واژه‌های فارسی؛ ترکیب ساعت/دقیقهٔ `startup_delay`؛ قالب `seconds_minutes_format` |
 
-### ب) ترکیبی — رفتاری + تأیید متنِ کد (۱۴ فایل، ۹۴ تأیید متنی)
+### ب) ترکیبی — رفتاری + تأیید متنِ کد (۱۵ فایل، ۱۱۳ تأیید متنی)
 
 | تست | رفتاری (واقعاً اجرا می‌شود) | فقط-متنی (`in src`) |
 |---|---|---|
 | `test_op_serialization.py` | **پرحجم‌ترین تست رفتاری:** `95.py` واقعاً import و `ExCooldown` با asyncio واقعی رانده می‌شود: کول‌داون هر action، معنای key/one-per-x، purge، `since_done`، بازهٔ gap تطبیقی `[15–20]` با زمان fake، **رگرسیون فاصلهٔ هم‌زمانی (≥۰٫۰۵s با دو task هم‌زمان)**، **رگرسیون deadline فلوت (≥۳۰s)**، زمان‌بندی `scheduled_check_in`/`check_allowed_now` | ۲۰: نام‌های فراخوانی `ex_cd.action(...)` در حلقه‌های run + متن ثابت‌های gap |
 | `test_tutorial_sections.py` | افزودن/ویرایش بخش با لیبل/ایموجی/یادداشت/متن/تاخیر/دکمه؛ toggle+جابه‌جایی+حذف؛ done؛ fallback متن قدیمی؛ ارسال هر بخش با `_send` (تاخیر در حالت تست پنل نادیده گرفته می‌شود)؛ اعتبارسنجی فرمت لینک دکمه؛ ارقام فارسی («۵» → ۵s)؛ «۱۰ دقیقه» → ۶۰۰s | ۱۲: توکن‌های FSM و callback، پارس ثانیه/دقیقه/ساعت، نمایش تاخیر، مهاجرت متن قدیمی به بخش‌ها |
+| `test_tutorial_hub.py` | «🗂 توضیحات» (فهرست تپ‌کردنی): لیست خودکار همهٔ بخش‌های فعال (بدون کار دوبارهٔ مدیر)؛ **توضیحاتِ پیش‌فرضِ قابلیت‌ها (۱۱ مورد)**: پر‌بودنِ متن‌ها و بی‌جای‌نگهدار‌بودنشان + کلیدواژهٔ هر قابلیت، جای‌خالی‌گیری وقتی فهرست خالی است و کنار‌رفتن با اولین بخش، تپِ توضیح + دکمهٔ همان کار + بازگشت، کلیدِ ناشناخته (بی‌صدا)، `hub:all` با پیش‌فرض‌ها، خاموش/روشنِ `a:hub_def` + پایداری، و «📥 تبدیل به بخش» (`a:hub_mk`): ۱۱ بخشِ `hub:*` با `when=manual`، متنِ پیش‌فرض تا ویرایشِ مدیر، حذفِ تکرار، بی‌اثریِ اجرای دوباره؛ تپِ هر آموزش = فقط همان می‌رود + دکمهٔ «🗂 همه‌ی توضیحات» (حتی با once=True)؛ صفحه‌بندی با hub_page_size (۱۲ بخش → ۳ صفحه، بدون تکرار، کلمپ صفحهٔ نامعتبر)؛ ورق‌زدن همان پیام را edit می‌کند (بدون اسپم)؛ `hub:all` همه را می‌فرستد؛ پنل مدیر: `a:hub`، روشن/خاموش دکمه، چرخهٔ تعداد در صفحه، ✅/⬜ کردن هر بخش (`a:hub_t`، `a:sec_hub`، پایداری در `manager_config.json`)، متن بالای فهرست (`a:hub_i` + بازگشت با «-»)؛ مخفی‌شدن بخش خاموش/`in_hub=False` | ۱۹: توکن‌های DEFAULTS/منو/روت‌ها، وجود `in_hub` در `tut_norm`، انبارهٔ `HUB_DEFAULTS`، پاک‌شدن `hub_intro` مثل `cm_intro` |
 | `test_claim_flow_fixes.py` | موتور ادعا با telethon جعلی: strikes/یادآوری‌ها per-uid (جدا بودن state کاربرها)، متن kick «بدل شد»، `remind_one_limit`، سیم‌کشی `claim_env_selfbot_ok` | ۱۰: جریان بدون ورودی، یک‌بار کارت ادعا، ممنوعیت شماره/اسکرین‌شات در متن claim |
 | `test_round2_update.py` | ~۴۰ سنجه: ذخیره/decay/سقف `flood_extra` (۴۰)؛ روشن/خاموش/ریست تطبیقی از پنل؛ تنظیمات flood/decay/uptime/permanent با ارقام فارسی و فرمت خراب (مقدار دست‌نخورده می‌ماند)؛ `permanent=0` = ∞؛ نمایش/تنظیم جیتر و پنجرهٔ ۰؛ **مهاجرت مقادیر قدیمی** (interval 20→30، strikes 3→2، recheck 24h، scan_last_time)؛ صفحهٔ وضعیت (پایه vs مؤثر) | ۹ |
 | `test_tutorial.py` | ارسال آموزش/گروه‌بندی بخش‌ها/نسخهٔ تک‌پیامی (۲ گروه × بخش‌ها، حالت کپی، پیگیری id) | ۷: دکمه/FSM آموزش (`m:tut`، `tut_set`، whitelist، `tut_chat/tut_ids`) |
@@ -70,7 +71,7 @@
 | موتور تعویض اکانت + سریال‌سازی عملیات | `op_serialization`، `exchange_group_gate`، `exchange_notjoined_flow`، `exchange_reply_timing`، `say_dedup`، `saved_panel` | عمیق |
 | فلوت تطبیقی/مدارشکن/گپ | `spacing_algorithm`، `check_gate_flood`، `flood_circuit_breaker`، `round2_update` | عمیق |
 | پاسخ خودکار متن آزاد | `unknown_fallback` | عمیق |
-| پنل و سیستم آموزش | `menu_tutorials`، `tutorial`، `tutorial_presets`، `tutorial_sections` | عمیق |
+| پنل و سیستم آموزش | `menu_tutorials`، `tutorial`، `tutorial_presets`، `tutorial_sections`، `tutorial_hub` | عمیق |
 | تنظیمات/env/تایمرها | `config_env`، `round2_update`، `timers` | عمیق |
 | بوت استقرار (Render/Railway) | `render_host`، `railway_container_layout`، `railway_selfbot_bootstrap`، `crashloop_hardening`، `duplicate_instances`، `shutdown_cancel` | عمیق (با ابزارهای shim) |
 
