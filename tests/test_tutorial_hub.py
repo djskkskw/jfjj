@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""🗂 «آموزش‌ها» — فهرستِ تپ‌کردنیِ همه‌ی آموزش‌ها.
+"""🗂 «توضیحات» — فهرستِ تپ‌کردنیِ همه‌ی توضیحات.
 
 قفل کردن این رفتار:
 
-  1. منوی مشتری یک دکمه‌ی جدا دارد: «🗂 آموزش‌ها» (m:hub) — کنارِ
+  1. منوی مشتری یک دکمه‌ی جدا دارد: «🗂 توضیحات» (m:hub) — کنارِ
      «📚 آموزش فعال‌سازی» که دست‌نخورده می‌ماند.
   2. فهرست، همه‌ی بخش‌های فعالِ «🧩 بخش‌های آموزش» را خودکار نشان می‌دهد
      (هیچ کارِ دوباره‌ای لازم نیست) + آیتمِ «📖 آموزش فعال‌سازی (کامل)».
@@ -11,10 +11,13 @@
      «🗂 همه‌ی آموزش‌ها» برای برگشت به فهرست (حتی اگر once=True باشد).
   4. صفحه‌بندی: با hub_page_size (پیش‌فرض ۸) ورق می‌خورد؛ «⬅️ قبلی/➡️ بعدی».
   5. «📤 ارسال همه‌ی آموزش‌ها» همه‌ی آموزش‌های فهرست را پشت‌سرهم می‌فرستد.
-  6. پنل مدیر: صفحه‌ی «🗂 آموزش‌ها» — روشن/خاموش دکمه، متن بالای صفحه،
+  6. پنل مدیر: صفحه‌ی «🗂 توضیحات» — روشن/خاموش دکمه، متن بالای صفحه،
      تعداد در هر صفحه، و ✅/⬜ کردنِ هر آموزش در فهرست (in_hub).
   7. بخشِ خاموش یا in_hub=False در فهرست نمی‌آید؛ خاموش‌کردنِ hub_on دکمه را
      از منوی مشتری برمی‌دارد.
+  8. توضیحاتِ پیش‌فرضِ قابلیت‌های ربات (HUB_DEFAULTS) تا وقتی مدیر متنِ خودش را
+     نگذاشته در فهرست می‌آیند؛ با «📥 تبدیل به بخش» به بخشِ قابل‌ویرایش
+     (preset=hub:<key>) تبدیل می‌شوند و دیگر تکراری نشان داده نمی‌شوند.
 
 روش اجرا مثل بقیه‌ی تست‌ها: سورس واقعی manager_82 با telethon قلابی و
 دیتابیس واقعی (فایلی) ران می‌شود.
@@ -267,11 +270,11 @@ INNER = textwrap.dedent('''
         check('"hub_on": True' in src, "DEFAULTS has hub_on")
         check('"hub_intro": ""' in src, "DEFAULTS has hub_intro")
         check('"hub_page_size": 8' in src, "DEFAULTS has hub_page_size")
-        check('B("🗂 آموزش‌ها", "m:hub", "success")' in src,
+        check('B("🗂 توضیحات", "m:hub", "success")' in src,
               "user main menu has m:hub button")
         check('B("📚 آموزش فعال‌سازی", "m:tut", "success")' in src,
               "legacy 📚 آموزش فعال‌سازی button kept")
-        check('B("🗂 آموزش‌ها (فهرست تپ‌کردنی)", "a:hub", "success")' in src,
+        check('B("🗂 توضیحات (فهرست تپ‌کردنی)", "a:hub", "success")' in src,
               "admin menu has a:hub button")
         check('"in_hub": bool(s.get("in_hub", True))' in src,
               "tut_norm carries in_hub (default True)")
@@ -282,6 +285,12 @@ INNER = textwrap.dedent('''
               "route hub:s:<id> (tap an item) present")
         check('if data == "hub:list":' in src, "route hub:list present")
         check('stp == "hub_intro"' in src, "hub_intro text step handled")
+        check('"hub_defaults": True' in src, "DEFAULTS has hub_defaults")
+        check("HUB_DEFAULTS = (" in src, "HUB_DEFAULTS table present")
+        check('if data.startswith("hub:d:"):' in src,
+              "route hub:d:<key> (default topic) present")
+        check('if k == "hub_mk":' in src, "admin action a:hub_mk present")
+        check('if k == "hub_def":' in src, "admin action a:hub_def present")
         check('"hub_intro"' in src.split('"cm_add", "cm_edit", "cm_intro"')[1][:80],
               "hub_intro cleared like cm_intro on other buttons")
 
@@ -292,7 +301,7 @@ INNER = textwrap.dedent('''
 
         # ---------- منوی مشتری ----------
         check("m:hub" in btn_datas(M.main_menu(has_hub=True)),
-              "main_menu shows 🗂 آموزش‌ها when has_hub")
+              "main_menu shows 🗂 توضیحات when has_hub")
         check("m:hub" not in btn_datas(M.main_menu(has_hub=False)),
               "main_menu hides 🗂 آموزش‌ها when has_hub=False")
 
@@ -432,11 +441,11 @@ INNER = textwrap.dedent('''
         check("صفحه‌ی 3 از 3" in m.hub_view(99)[0],
               "out-of-range page clamps to the last page")
 
-        # ---------- 8) پنل مدیر: صفحه‌ی 🗂 آموزش‌ها ----------
+        # ---------- 8) پنل مدیر: صفحه‌ی 🗂 توضیحات ----------
         ev = FakeCbEv(ADMIN, "a:hub")
         await m.on_callback(ev)
         txt, kb = ev.edits[-1]
-        check("آموزش‌ها" in txt and "a:hub_t" in " ".join(btn_datas(kb)),
+        check("توضیحات" in txt and "a:hub_t" in " ".join(btn_datas(kb)),
               "a:hub opens the hub admin page")
         check("a:hub_on" in btn_datas(kb) and "a:hub_i" in btn_datas(kb),
               "hub page has on/off + intro controls")
@@ -551,6 +560,142 @@ INNER = textwrap.dedent('''
         check(menus and "m:hub" in btn_datas(menus[-1][2].get("buttons")),
               "section-tag menu links to the 🗂 list")
 
+        # ---------- 11) توضیحاتِ پیش‌فرضِ قابلیت‌ها ----------
+        # تا وقتی بخشی در فهرست نیست، اینها جای خالی را پر می‌کنند
+        keys = [d[0] for d in m.HUB_DEFAULTS]
+        bodies = {k: m.hub_default_text(k) for k in keys}
+        check(all(b.strip() for b in bodies.values()),
+              "every default topic has a real description text")
+        check(all(len(b) > 120 for b in bodies.values()),
+              "default descriptions are substantial (not one-liners)")
+        check(all("{" not in b and "}" not in b and "None" not in b
+                  and "<<" not in b for b in bodies.values()),
+              "no leftover placeholders / raw braces in default texts")
+        want_kw = {"start": "سلف", "trial": "رایگان", "exchange": "جوین",
+                   "wallet": "کیف پول", "points": "امتیاز", "sub": "اشتراک",
+                   "ref": "دعوت", "security": "کد", "panel": ".panel",
+                   "svc": "خاموش", "support": "تیکت"}
+        check(all(want_kw[k] in bodies[k] for k in keys),
+              "each default text describes its own capability")
+
+        # خالی‌کردنِ فهرست از بخش‌ها → پیش‌فرض‌ها می‌آیند
+        for sec in m.tut_sections():
+            m.tut_update(sec["id"], in_hub=False)
+        check(not m.hub_sections(), "list emptied of admin sections (test setup)")
+        defaults = m.hub_default_items()
+        check(len(defaults) == len(m.HUB_DEFAULTS),
+              "all built-in feature topics fill the empty list")
+        txt, kb = m.hub_view(0)
+        datas = btn_datas(kb)
+        check("hub:d:start" in datas and "hub:d:trial" in datas,
+              "default topics are tappable items in the list")
+
+        # تپِ یک توضیحِ پیش‌فرض: متن + دکمه‌ی همان کار + بازگشت به فهرست
+        fake_now[0] += 5
+        bot.text_sends, bot.msg_sends = [], []
+        ev = FakeCbEv(USER, "hub:d:trial")
+        await m.on_callback(ev)
+        sent = [x for x in bot.text_sends if x[0] == USER]
+        check(len(sent) == 1, "tapping a default topic sends its description")
+        d_datas = btn_datas(sent[0][2].get("buttons"))
+        check("m:trial" in d_datas and "hub:list" in d_datas,
+              "default topic carries its own action button + back to list")
+
+        # توضیحی که دکمه‌ی کار ندارد (تبادل/امنیت) هم می‌رود
+        fake_now[0] += 5
+        bot.text_sends = []
+        ev = FakeCbEv(USER, "hub:d:exchange")
+        await m.on_callback(ev)
+        sent = [x for x in bot.text_sends if x[0] == USER]
+        check(len(sent) == 1 and "hub:list" in
+              btn_datas(sent[0][2].get("buttons")),
+              "topics without their own button still work")
+
+        # کلیدِ ناشناخته → بی‌صدا و بدون خطا
+        fake_now[0] += 5
+        bot.text_sends = []
+        ev = FakeCbEv(USER, "hub:d:nope")
+        await m.on_callback(ev)
+        check(not [x for x in bot.text_sends if x[0] == USER],
+              "unknown default key sends nothing")
+
+        # «📤 ارسال همه» با فهرستِ پیش‌فرض‌ها
+        fake_now[0] += 5
+        bot.text_sends, bot.msg_sends = [], []
+        ev = FakeCbEv(USER, "hub:all")
+        await m.on_callback(ev)
+        got = len([x for x in bot.text_sends if x[0] == USER]) + \
+            len([x for x in bot.msg_sends if x[0] == USER])
+        check(got == len(m.hub_default_items()),
+              "hub:all sends the default topics too")
+
+        # خاموش‌کردنِ پیش‌فرض‌ها از پنل
+        ev = FakeCbEv(ADMIN, "a:hub_def")
+        await m.on_callback(ev)
+        check(m.hub_defaults_on() is False, "a:hub_def turns defaults off")
+        check(not m.hub_default_items(), "defaults gone from the list")
+        check("hub:d:start" not in btn_datas(m.hub_view(0)[1]),
+              "no default topic button while off")
+        with open(M.CONFIG_FILE, encoding="utf-8") as f:
+            check(json.load(f)["hub_defaults"] is False,
+                  "hub_defaults persisted")
+        fake_now[0] += 5
+        bot.text_sends = []
+        ev = FakeCbEv(USER, "hub:d:start")
+        await m.on_callback(ev)
+        check(not [x for x in bot.text_sends if x[0] == USER],
+              "tapping a disabled default sends nothing")
+        fake_now[0] += 5
+        ev = FakeCbEv(ADMIN, "a:hub_def")
+        await m.on_callback(ev)
+        check(m.hub_defaults_on() is True, "a:hub_def turns them back on")
+
+        # یکی از بخش‌ها را برمی‌گردانیم → پیش‌فرض‌ها کنار می‌روند
+        m.tut_update(m.tut_sections()[0]["id"], in_hub=True)
+        check(not m.hub_default_items(),
+              "as soon as one section is listed, defaults step aside")
+
+        # ---------- 12) تبدیلِ پیش‌فرض‌ها به بخشِ قابل‌ویرایش ----------
+        for sec in m.tut_sections():
+            m.tut_update(sec["id"], in_hub=False)
+        n_before = len(m.tut_sections())
+        n_defs = len(m.hub_defaults_all())
+        ev = FakeCbEv(ADMIN, "a:hub_mk")
+        await m.on_callback(ev)
+        secs = m.tut_sections()
+        check(len(secs) == n_before + n_defs,
+              "a:hub_mk turns every default into an editable section")
+        made = [s for s in secs if str(s.get("preset") or "").startswith("hub:")]
+        check(len(made) == n_defs, "materialised sections remember their key")
+        check(all(s["when"] == "manual" for s in made),
+              "materialised sections only send from the list (no auto-spam)")
+        start_sec = next((s for s in made if s["preset"] == "hub:start"), None)
+        check(start_sec is not None and start_sec["btn_cmd"] == "s:setup",
+              "materialised section keeps its action button")
+        check(m.tut_body_text(start_sec) == m.hub_default_text("start"),
+              "materialised section shows the default text until the admin edits it")
+        check(not m.hub_defaults_all(),
+              "materialised defaults are not offered again")
+        all_datas = []
+        for pg in range(m.hub_pages()):
+            all_datas += btn_datas(m.hub_view(pg)[1])
+        check(f"hub:s:{start_sec['id']}" in all_datas,
+              "materialised section is now a list item")
+        check(not [d for d in all_datas if d.startswith("hub:d:")],
+              "no duplicate default buttons next to their sections")
+        # ویرایشِ متن توسطِ مدیر روی همان بخش می‌نشیند
+        m.tut_update(start_sec["id"], text="📌 متنِ خودم برای راه‌اندازی")
+        check(m.tut_body_text(m.tut_find(start_sec["id"])) ==
+              "📌 متنِ خودم برای راه‌اندازی",
+              "admin text replaces the default description")
+        # اجرای دوباره‌ی a:hub_mk چیزی تکراری نمی‌سازد
+        n_now = len(m.tut_sections())
+        fake_now[0] += 5
+        ev = FakeCbEv(ADMIN, "a:hub_mk")
+        await m.on_callback(ev)
+        check(len(m.tut_sections()) == n_now,
+              "running a:hub_mk twice does not duplicate sections")
+
         time.time = real_time
 
     asyncio.run(main())
@@ -595,7 +740,7 @@ def run_inner(port):
 
 
 if __name__ == "__main__":
-    print("--- 🗂 آموزش‌ها: فهرستِ تپ‌کردنیِ همه‌ی آموزش‌ها ---")
+    print("--- 🗂 توضیحات: فهرستِ تپ‌کردنیِ همه‌ی توضیحات ---")
     reset()
     out = run_inner(8173)
     checks = [ln for ln in out.splitlines() if ln.startswith("CHECK")]

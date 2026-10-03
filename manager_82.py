@@ -1601,10 +1601,11 @@ DEFAULTS = {
     # هر مورد: {"title": عنوان، "cmd": دستور، "note": توضیح ساده}
     "cmd_items": [],
     "cmd_intro": "",        # متنِ بالای صفحه‌ی دستورات آماده (خالی = متن پیش‌فرض)
-    # ── 🗂 آموزش‌ها: فهرستِ تپ‌کردنیِ همه‌ی بخش‌ها ──
-    "hub_on": True,         # دکمه‌ی «🗂 آموزش‌ها» در منوی اصلی مشتری
-    "hub_intro": "",        # متنِ بالای فهرست (خالی = متن پیش‌فرض)
-    "hub_page_size": 8,     # چند آموزش در هر صفحه
+    # ── 🗂 توضیحات: فهرستِ تپ‌کردنیِ همه‌ی بخش‌ها ──
+    "hub_on": True,         # دکمه‌ی «🗂 توضیحات» در منوی اصلی مشتری
+    "hub_intro": "",        # متنِ بالای فهرستِ «🗂 توضیحات» (خالی = پیش‌فرض)
+    "hub_page_size": 8,     # چند مورد در هر صفحه
+    "hub_defaults": True,   # توضیحاتِ پیش‌فرضِ قابلیت‌های ربات در فهرست
     # ── فروشگاه ──
     "shop_on": True,
     "card_number": "",      # شماره کارت برای واریز
@@ -2551,9 +2552,9 @@ def main_menu(is_admin=False, shop_on=True, points_on=True,
                      B("🎁 زیرمجموعه", "m:ref", "success")])
         rows.append([B("🧾 سفارش‌ها", "m:orders", "primary"),
                      B("🎧 پشتیبانی", "m:support", "primary")])
-    # 🗂 آموزش‌ها — فهرستِ تپ‌کردنیِ همه‌ی آموزش‌ها (هر بخشی که مدیر بسازد)
+    # 🗂 توضیحات — فهرستِ تپ‌کردنیِ همه‌ی توضیحات (هر بخشی که مدیر بسازد)
     if has_hub:
-        rows.append([B("🗂 آموزش‌ها", "m:hub", "success")])
+        rows.append([B("🗂 توضیحات", "m:hub", "success")])
     rows.append([B("📚 آموزش فعال‌سازی", "m:tut", "success"),
                  B("📖 راهنما", "m:help")])
     # فقط وقتی مدیر دستوری ثبت کرده باشد؛ وگرنه دکمه‌ی خالی می‌دهد.
@@ -2625,7 +2626,7 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B("🩺 سلامت سیستم", "a:doctor", "success")],
         [B("🎬 آموزش فعال‌سازی", "a:tut", "success"),
          B("🧩 بخش‌های آموزش", "a:secs", "success")],
-        [B("🗂 آموزش‌ها (فهرست تپ‌کردنی)", "a:hub", "success")],
+        [B("🗂 توضیحات (فهرست تپ‌کردنی)", "a:hub", "success")],
         [B("📝 متن خوش‌آمدگویی", "a:welcome", "primary"),
          B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
         [B("📝 متن‌های ربات", "a:rt", "success"),
@@ -4226,7 +4227,10 @@ class Manager:
         if t:
             return t
         if s.get("preset"):
-            return self.tut_preset_text(s["preset"])
+            p = str(s["preset"])
+            if p.startswith("hub:"):
+                return self.hub_default_text(p[4:])
+            return self.tut_preset_text(p)
         return ""
 
     def tut_btn_rows(self, s):
@@ -4445,7 +4449,7 @@ class Manager:
               for s in secs]
         if self.hub_on():
             # فهرستِ همیشه‌در‌دسترس: همه‌ی آموزش‌ها یک‌جا، تپ‌کردنی
-            kb.append([B("🗂 همه‌ی آموزش‌ها (فهرست)", "m:hub", "primary")])
+            kb.append([B("🗂 توضیحات (فهرست)", "m:hub", "primary")])
         kb.append([B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")])
         kb.append(back_btn())
         return await self.say(uid,
@@ -4454,17 +4458,44 @@ class Manager:
             kb)
 
     # ═══════════════════════════════════════════════
-    #  🗂 آموزش‌ها — فهرستِ تپ‌کردنیِ همه‌ی بخش‌ها
+    #  🗂 توضیحات — فهرستِ تپ‌کردنیِ همه‌ی بخش‌ها
     #  هر بخشی که در «🧩 بخش‌های آموزش» ساخته شود، خودکار این‌جا می‌آید؛
     #  با «👁 در فهرست» می‌توانی هر کدام را از این صفحه قایم/نمایان کنی.
     # ═══════════════════════════════════════════════
     HUB_MAIN = ("📖 آموزش فعال‌سازی (کامل)", "m:tut")
 
+    # ── توضیحاتِ پیش‌فرضِ فهرست: قابلیت‌های ربات ──
+    # تا وقتی مدیر متنِ خودش را نگذاشته، همین‌ها برای مشتری می‌روند و
+    # با «📥 ساختن بخش از پیش‌فرض‌ها» به بخشِ قابل‌ویرایش تبدیل می‌شوند.
+    # (key, emoji, عنوان, مقصدِ دکمه‌ی پایان, برچسبِ دکمه)
+    HUB_DEFAULTS = (
+        ("start", "🚀", "راه‌اندازی سلف روی اکانت",
+         "s:setup", "🚀 راه‌اندازی سلف روی اکانتم"),
+        ("svc", "⚙️", "سرویس من: روشن / خاموش",
+         "m:svc", "⚙️ سرویس من"),
+        ("trial", "🎁", "تست رایگان",
+         "m:trial", "🎁 تست رایگان"),
+        ("panel", "🕹", "پنل سلف در Saved Messages",
+         "m:tut", "📚 آموزش فعال‌سازی"),
+        ("exchange", "🤝", "تبادل ممبر", "", ""),
+        ("wallet", "💳", "کیف پول و شارژ",
+         "m:wallet", "💳 کیف پول"),
+        ("points", "🎯", "امتیاز چطور کار می‌کند",
+         "m:packs", "🎯 خرید امتیاز"),
+        ("sub", "💎", "اشتراک ماهانه",
+         "m:plans", "💎 اشتراک ماهانه"),
+        ("ref", "🎁", "زیرمجموعه و پاداش",
+         "m:ref", "🎁 زیرمجموعه"),
+        ("security", "🔐", "امنیت و لغو دسترسی", "", ""),
+        ("support", "🎧", "پشتیبانی",
+         "m:support", "🎧 پشتیبانی"),
+    )
+
     def hub_on(self):
         return bool(self.cfg.get("hub_on", True))
 
     def hub_sections(self):
-        """بخش‌هایی که در فهرست «🗂 آموزش‌ها» دیده می‌شوند."""
+        """بخش‌هایی که در فهرست «🗂 توضیحات» دیده می‌شوند."""
         return [s for s in self.tut_sections(on_only=True)
                 if s.get("in_hub", True)]
 
@@ -4474,6 +4505,212 @@ class Manager:
         except Exception:
             return 8
 
+    # ─────────── توضیحاتِ پیش‌فرض (قابلیت‌های ربات) ───────────
+    def hub_defaults_on(self):
+        return bool(self.cfg.get("hub_defaults", True))
+
+    def hub_made_keys(self):
+        """کلیدهای پیش‌فرضی که مدیر از قبل به بخش تبدیل کرده (تا دوباره نیایند)."""
+        out = set()
+        for s in self.tut_sections():
+            p = str(s.get("preset") or "")
+            if p.startswith("hub:"):
+                out.add(p[4:])
+        return out
+
+    def hub_defaults_all(self):
+        """پیش‌فرض‌هایی که هنوز به بخشِ قابل‌ویرایش تبدیل نشده‌اند."""
+        done = self.hub_made_keys()
+        return [d for d in self.HUB_DEFAULTS if d[0] not in done]
+
+    def hub_default_items(self):
+        """پیش‌فرض‌هایی که همین حالا در فهرست نشان داده می‌شوند.
+
+        تا وقتی مدیر هیچ بخشی در فهرست ندارد (و سوئیچ روشن است)،
+        توضیحاتِ پیش‌فرضِ قابلیت‌ها جای خالی را پر می‌کنند. به‌محضِ
+        اضافه‌شدنِ اولین بخش کنار می‌روند؛ برای اینکه متنِ خودت را روی
+        همین‌ها بگذاری، یک‌بار «📥 تبدیل به بخش» را بزن تا بخشِ قابل‌ویرایش
+        شوند (بعد از آن، متنِ هرکدام را از صفحه‌ی همان بخش عوض کن).
+        """
+        if not self.hub_defaults_on():
+            return []
+        if self.hub_sections():
+            return []
+        return self.hub_defaults_all()
+
+    def hub_default_row(self, item):
+        return [B(f"{item[1]} {item[2]}", f"hub:d:{item[0]}", "success")]
+
+    def hub_default_text(self, key):
+        """متنِ توضیحِ پیش‌فرضِ یک قابلیت، با اعدادِ فعلیِ تنظیمات."""
+        cfg = self.cfg
+        L = self.LINE
+        per = max(1, int(cfg.get("cost_per_hour", 1) or 1))
+        mn = int(cfg.get("min_points", 20) or 0)
+        start_fee = int(cfg.get("start_fee", 0) or 0)
+        low = int(cfg.get("low_warn", 10) or 0)
+        mins = max(1, int(cfg.get("trial_minutes", 30) or 30))
+        r_self = int(cfg.get("referral_points_self", 1) or 0)
+        r_no = int(cfg.get("referral_points", 2) or 0)
+        pct = int(cfg.get("referral_percent", 0) or 0)
+
+        if key == "start":
+            return (
+                f"🚀 <b>راه‌اندازی سلف روی اکانت</b>\n{L}\n"
+                "سلف روی اکانتِ خودت اجرا می‌شود؛ یعنی مثل یک «دستگاه جدید» وارد "
+                "اکانتت می‌شود و از طرف خودت کار می‌کند — دقیقاً مثل تلگرام دسکتاپ، "
+                "فقط کارهایی که خودت در پنلش تنظیم کرده‌ای را خودش انجام می‌دهد.\n\n"
+                "<b>قدم ۱</b> — از منوی اصلی «🚀 راه‌اندازی سلف روی اکانتم» را بزن.\n"
+                "<b>قدم ۲</b> — دکمه‌ی «📱 ارسال شماره» پایین صفحه را بزن "
+                "(شماره‌ی همین اکانت خودت).\n"
+                "<b>قدم ۳</b> — کدی که تلگرام برایت می‌فرستد را داخل ربات بفرست.\n\n"
+                f"{L}\n"
+                "✅ پیام «راه‌اندازی شد» که آمد، سلف روشن است و می‌توانی از "
+                "«⚙️ سرویس من» کنترلش کنی.\n"
+                "🎁 اگر حساب نو باشد، همان‌جا تست رایگان هم فعال می‌شود.\n\n"
+                "⚠️ کد را با فاصله بین رقم‌ها بفرست (مثل <code>1 2 3 4</code>) و "
+                "هیچ‌وقت آن را به کسی بیرون از ربات نده."
+            )
+        if key == "svc":
+            return (
+                f"⚙️ <b>سرویس من — کنترل کامل دستِ خودت</b>\n{L}\n"
+                "از «⚙️ سرویس من» در همین ربات:\n"
+                "• وضعیت سلف را می‌بینی: 🟢 در حال کار / 🟡 متوقف\n"
+                "• هر وقت خواستی روشن یا خاموشش می‌کنی\n"
+                "• اعتبار و زمان باقی‌مانده را می‌بینی\n"
+                "• اگر مشکلی پیش آمد، همان‌جا یک‌بار خاموش/روشن کافی است\n\n"
+                f"{L}\n"
+                f"🎯 امتیازی‌ها: هر ساعتِ روشن‌بودن <b>{_fa_digits(per)}</b> امتیاز کم "
+                f"می‌شود و برای روشن‌کردن حداقل <b>{_fa_digits(mn)}</b> امتیاز لازم است"
+                + (f" (هر بار روشن‌کردن {_fa_digits(start_fee)} امتیاز)"
+                   if start_fee else "") + ".\n"
+                f"🟠 زیر <b>{_fa_digits(low)}</b> امتیاز هشدار می‌گیری و صفر که شد "
+                "سرویس خاموش می‌شود.\n"
+                "💤 با اشتراک ماهانه، تا پایان دوره هیچ امتیازی مصرف نمی‌شود."
+            )
+        if key == "trial":
+            return (
+                f"🎁 <b>تست رایگان {_fa_digits(mins)} دقیقه‌ای</b>\n{L}\n"
+                "بدون پرداخت، بدون کارت بانکی و بدون تعهد — کامل امتحان کن؛ "
+                "راضی بودی ادامه بده، نبودی هیچ هزینه‌ای ندادی.\n\n"
+                "<b>قدم ۱</b> — «🎁 تست رایگان» را بزن.\n"
+                "<b>قدم ۲</b> — دکمه‌ی «📱 ارسال شماره» را بزن.\n"
+                "<b>قدم ۳</b> — کد تلگرام را بفرست.\n\n"
+                f"{L}\n"
+                "⏱ تایمر از لحظه‌ای شروع می‌شود که سلف روی اکانتت بالا بیاید و "
+                "چند دقیقه آخر هم خودِ ربات یادآوری می‌کند.\n"
+                "🔁 تست رایگان برای هر نفر یک‌بار است؛ بعدش امتیاز یا اشتراک لازم است."
+            )
+        if key == "panel":
+            return (
+                f"🕹 <b>پنل سلف — داخل Saved Messages</b>\n{L}\n"
+                "بعد از راه‌اندازی، همه‌ی تنظیمات سلف دستِ خودت است: داخل چتِ "
+                "«پیام‌های ذخیره‌شده» (Saved Messages) اکانت خودت بنویس:\n\n"
+                "<code>.panel</code>\n\n"
+                "همان‌جا این‌ها را تنظیم می‌کنی:\n"
+                "• ⏰ فعالیت/استراحت و سقف ارسال در ساعت\n"
+                "• 🤝 تبادل: روشن/خاموش، فاصله‌ها، جوین و لفت\n"
+                "• 🎛 دو پروفایل مستقل: عادی و ویژه (VIP)\n"
+                "• 📊 وضعیت زنده و گزارش کار\n\n"
+                f"{L}\n"
+                "💡 دستورها هم با <code>.</code> و هم با <code>/</code> کار می‌کنند."
+            )
+        if key == "exchange":
+            return (
+                f"🤝 <b>تبادل ممبر — چطور کار می‌کند</b>\n{L}\n"
+                "• طرف پیام می‌دهد «جوین شدم» → سلف <b>واقعاً</b> چک می‌کند عضو "
+                "کانال تو شده یا نه.\n"
+                "• اگر شده بود، سلف هم عضو کانال او می‌شود.\n"
+                "• اگر بعداً از کانالت بیرون بیاید، سلف خودکار از کانال او لفت می‌دهد.\n"
+                "• اگر ادعا کند ولی عضو نشده باشد، دو پیام «نیومدی» با فاصله‌ی "
+                "تصادفی می‌فرستد و بعد لفت می‌دهد.\n\n"
+                f"{L}\n"
+                "🛡 بین درخواست‌ها فاصله‌ی امن (تصادفی) رعایت می‌شود تا اکانتت "
+                "شبیه یک آدم رفتار کند — این فاصله‌ها را صفر نکن.\n"
+                "⚙️ تنظیماتش در پنل سلف است: <code>.panel</code> → بخش تبادل."
+            )
+        if key == "wallet":
+            return (
+                f"💳 <b>کیف پول و شارژ</b>\n{L}\n"
+                "کیف پول، موجودیِ تومانیِ تو داخل ربات است؛ یک‌بار شارژ می‌کنی و "
+                "بعد خریدهایت را بدون کارت‌به‌کارتِ دوباره انجام می‌دهی.\n\n"
+                "<b>قدم ۱</b> — «💳 کیف پول» → «➕ افزایش موجودی».\n"
+                "<b>قدم ۲</b> — مبلغ را به شماره‌ی کارتِ فاکتور واریز کن.\n"
+                "<b>قدم ۳</b> — <b>عکس رسید</b> را همان‌جا بفرست.\n"
+                "<b>قدم ۴</b> — بعد از تأیید مدیر، موجودی خودکار اضافه می‌شود.\n\n"
+                f"{L}\n"
+                "💡 با «خرید با کیف پول» خریدها درجا و بدون تأیید انجام می‌شوند.\n"
+                "📋 گردش تراکنش‌ها همیشه در «💳 کیف پول» هست.\n"
+                "⚠️ رسید را فقط داخل همین ربات بفرست."
+            )
+        if key == "points":
+            return (
+                f"🎯 <b>امتیاز چطور کار می‌کند</b>\n{L}\n"
+                "امتیاز، سوختِ سلف است:\n"
+                f"• هر ساعتِ روشن‌بودن: <b>{_fa_digits(per)}</b> امتیاز\n"
+                f"• برای روشن‌کردن: حداقل <b>{_fa_digits(mn)}</b> امتیاز\n"
+                f"• زیر <b>{_fa_digits(low)}</b> امتیاز هشدار می‌گیری\n"
+                "• امتیاز که صفر شود، سرویس خودکار خاموش می‌شود\n"
+                "• خاموشش کنی، مصرف هم می‌ایستد — امتیازت نمی‌سوزد\n\n"
+                f"{L}\n"
+                "🛒 از «🎯 خرید امتیاز» می‌خری؛ مقدار دلخواه هم می‌توانی بدهی.\n"
+                "🎁 از دوستانت دعوت کن (بخش «🎁 زیرمجموعه») و رایگان امتیاز بگیر.\n"
+                "💎 اشتراک ماهانه داشته باشی، تا پایان دوره امتیاز مصرف نمی‌شود."
+            )
+        if key == "sub":
+            return (
+                f"💎 <b>اشتراک ماهانه</b>\n{L}\n"
+                "با اشتراک، سلف تا پایان دوره روشن می‌ماند و <b>هیچ امتیازی</b> "
+                "مصرف نمی‌شود — به‌خاطر کمبود امتیاز هم قطع نمی‌شود.\n\n"
+                "• پلن را از «💎 اشتراک ماهانه» انتخاب کن؛\n"
+                "• پرداخت کیف پول = درجا، کارت‌به‌کارت = با تأیید مدیر؛\n"
+                "• با پلن‌های چند اکانته می‌توانی چند سلف داشته باشی؛\n"
+                "• تمدید که کنی، روزهای جدید به باقی‌مانده اضافه می‌شود و از "
+                "دست نمی‌رود؛\n"
+                "• قبل از تمام‌شدن دوره یادآوری می‌گیری."
+            )
+        if key == "ref":
+            base = (f"🎁 <b>زیرمجموعه و پاداش</b>\n{L}\n"
+                    "لینک دعوتت را از «🎁 زیرمجموعه» بگیر و برای دوستانت بفرست "
+                    "(یا با دستور <code>/ref</code>).\n\n")
+            if r_self or r_no:
+                base += ("با هر دعوتِ <b>معتبر</b> امتیاز می‌گیری:\n"
+                         f"• سلف تو فعال باشد: <b>{_fa_digits(r_self)}</b> امتیاز\n"
+                         f"• سلف تو فعال نباشد: <b>{_fa_digits(r_no)}</b> امتیاز\n\n")
+            if pct:
+                base += (f"💰 خریدهای زیرمجموعه‌ات هم <b>{_fa_digits(pct)}٪</b> به "
+                         "کیف پولت برمی‌گرداند.\n\n")
+            base += (f"{L}\n"
+                     "✅ دعوت زمانی معتبر می‌شود که طرف شماره‌ی خودش را تأیید کند "
+                     "(رایگان است و سلف لازم ندارد).\n"
+                     "🚫 شماره‌ی تکراری پاداش نمی‌گیرد.")
+            return base
+        if key == "security":
+            return (
+                f"🔐 <b>امنیت و لغو دسترسی</b>\n{L}\n"
+                "• کد ورودی تلگرام را فقط داخل همین ربات بفرست و به هیچ‌کس "
+                "بیرون از ربات نده — هیچ پشتیبانی‌ای کد یا رمز نمی‌پرسد.\n"
+                "• رمز دومرحله‌ای (اگر داشته باشی) ذخیره نمی‌شود؛ فقط همان "
+                "لحظه‌ی ورود استفاده می‌شود.\n"
+                "• کنترل کامل دست خودت است: هر وقت خواستی از «⚙️ سرویس من» "
+                "خاموشش کن یا از تلگرام → Settings → Devices همان نشست را "
+                "«پایان» بده؛ همان لحظه سلف قطع می‌شود.\n"
+                "• اکانتت را از دستگاه‌های دیگر لفت نده و بعد از راه‌اندازی رمز "
+                "دومرحله‌ای را عوض نکن، وگرنه سلف قطع می‌شود.\n\n"
+                f"{L}\n"
+                "🗑 حذف کامل اطلاعات هم با یک تیکت «🎧 پشتیبانی» انجام می‌شود."
+            )
+        if key == "support":
+            return (
+                f"🎧 <b>پشتیبانی</b>\n{L}\n"
+                "هر سؤالی داشتی یا جایی گیر کردی، از «🎧 پشتیبانی» تیکت بفرست — "
+                "پیامت مستقیم به مدیر می‌رسد و همین‌جا جواب می‌گیری.\n\n"
+                "⏱ پاسخ معمولاً سریع است؛ اگر طول کشید، تیکت دوباره بفرست.\n"
+                "📌 برای پیگیری سریع‌تر، آیدی عددی‌ات را هم بنویس: دستور "
+                "<code>/whoami</code>."
+            )
+        return ""
+
     def hub_pages(self):
         n = len(self.hub_sections())
         return max(1, (n + self.hub_page_size() - 1) // self.hub_page_size())
@@ -4482,21 +4719,24 @@ class Manager:
         t = str(self.cfg.get("hub_intro") or "").strip()
         if t:
             return t
-        return ("🗂 <b>آموزش‌های جفج</b>\n" + self.LINE + "\n"
-                "هر آموزش را بزن تا همین‌جا برایت بیاید.\n"
+        return ("🗂 <b>توضیحات جفج</b>\n" + self.LINE + "\n"
+                "هر قسمت را بزن تا همین‌جا برایت بیاید.\n"
                 "<i>ترتیب پیشنهادی: از بالا به پایین.</i>")
 
     def hub_view(self, page=0):
         """(متن, کیبورد) صفحه‌ی فهرست آموزش‌ها. صفحه‌ی ۱ = ۰."""
         secs = self.hub_sections()
+        defaults = self.hub_default_items()
+        # آیتم‌های فهرست: بخش‌های مدیر، بعد توضیحاتِ پیش‌فرضِ قابلیت‌ها
+        items = [("s", s) for s in secs] + [("d", d) for d in defaults]
         per = self.hub_page_size()
-        pages = max(1, (len(secs) + per - 1) // per)
+        pages = max(1, (len(items) + per - 1) // per)
         try:
             page = int(page or 0)
         except (TypeError, ValueError):
             page = 0
         page = max(0, min(page, pages - 1))
-        items = secs[page * per:(page + 1) * per]
+        shown = items[page * per:(page + 1) * per]
 
         txt = [self.hub_intro(), self.LINE]
         if pages > 1:
@@ -4506,8 +4746,12 @@ class Manager:
         if page == 0:
             lbl, cmd = self.HUB_MAIN
             kb.append([B(lbl, cmd, "success")])
-        for s in items:
-            kb.append([B(self.tut_sec_label(s), f"hub:s:{s['id']}", "success")])
+        for kind, item in shown:
+            if kind == "s":
+                kb.append([B(self.tut_sec_label(item), f"hub:s:{item['id']}",
+                             "success")])
+            else:
+                kb.append(self.hub_default_row(item))
 
         nav = []
         if page > 0:
@@ -4517,11 +4761,11 @@ class Manager:
         if nav:
             kb.append(nav)
 
-        if secs:
-            kb.append([B("📤 ارسال همه‌ی آموزش‌ها", "hub:all", "primary")])
+        if items:
+            kb.append([B("📤 ارسال همه‌ی توضیحات", "hub:all", "primary")])
         else:
             txt.append("")
-            txt.append("<i>هنوز آموزشی جز آموزش اصلی اضافه نشده.</i>")
+            txt.append("<i>هنوز چیزی جز توضیح اصلی اضافه نشده.</i>")
         kb.append(back_btn("m:home"))
         return "\n".join(txt), kb
 
@@ -4531,7 +4775,35 @@ class Manager:
 
     def hub_back_row(self):
         """دکمه‌ی بازگشت به فهرست، آخرِ هر آموزشِ فرستاده‌شده."""
-        return [[B("🗂 همه‌ی آموزش‌ها", "hub:list", "primary")]]
+        return [[B("🗂 همه‌ی توضیحات", "hub:list", "primary")]]
+
+    async def hub_send_default(self, uid, key):
+        """یک توضیحِ پیش‌فرض را با دکمه‌ی پایانش می‌فرستد."""
+        item = next((d for d in self.hub_default_items() if d[0] == key), None)
+        if not item:
+            return False
+        body = self.hub_default_text(key)
+        if not body:
+            return False
+        rows = []
+        if item[3]:
+            rows.append([B(item[4] or "ادامه", item[3], "success")])
+        rows += self.hub_back_row()
+        await self.say(uid, body, rows, key=f"hub:d:{key}")
+        self.db.log(uid, "hub_default", key)
+        return True
+
+    async def hub_make_sections(self):
+        """توضیحاتِ پیش‌فرض را به بخشِ قابل‌ویرایش تبدیل می‌کند (یک‌بار برای هر کلید)."""
+        made = []
+        for key, emoji, name, cmd, lbl in self.hub_defaults_all():
+            s = self.tut_new(name=name, emoji=emoji)
+            if not s:
+                continue
+            self.tut_update(s["id"], preset=f"hub:{key}", when="manual",
+                            btn_cmd=cmd, btn_label=lbl, in_hub=True)
+            made.append(self.tut_find(s["id"]))
+        return made
 
     async def hub_send_all(self, uid):
         """همه‌ی آموزش‌های فهرست را به ترتیب (با فاصله‌ی خودِ هر بخش) می‌فرستد."""
@@ -4542,20 +4814,26 @@ class Manager:
             if await self.tut_send_section(uid, s["id"], force=True,
                                            extra=self.hub_back_row()):
                 n += 1
+        for d in self.hub_default_items():
+            if await self.hub_send_default(uid, d[0]):
+                n += 1
         return n
 
     # ─────────── پنل مدیر: مدیریت بخش‌ها ───────────
     async def hub_admin(self, ev):
-        """صفحه‌ی «🗂 آموزش‌ها» در پنل مدیر — تنظیم فهرستِ مشتری."""
+        """صفحه‌ی «🗂 توضیحات» در پنل مدیر — تنظیم فهرستِ مشتری."""
         secs = self.tut_sections()
         in_hub = self.hub_sections()
-        txt = [f"🗂 <b>آموزش‌ها (فهرست تپ‌کردنی)</b>", self.LINE,
-               "مشتری دکمه‌ی «🗂 آموزش‌ها» را می‌زند و این‌جا هر آموزش را "
+        txt = [f"🗂 <b>توضیحات (فهرست تپ‌کردنی)</b>", self.LINE,
+               "مشتری دکمه‌ی «🗂 توضیحات» را می‌زند و این‌جا هر توضیح را "
                "با یک تپ می‌گیرد.",
                self.LINE,
                f"وضعیت دکمه در منوی مشتری: "
                f"<b>{'🟢 روشن' if self.hub_on() else '🔴 خاموش'}</b>",
-               f"در فهرست: <b>{_fa_digits(len(in_hub))}</b> آموزش "
+               f"توضیحاتِ پیش‌فرض (قابلیت‌ها): "
+               f"<b>{'🟢 روشن' if self.hub_defaults_on() else '🔴 خاموش'}</b> — "
+               f"{_fa_digits(len(self.hub_defaults_all()))} موردِ آماده\n"
+               f"در فهرست: <b>{_fa_digits(len(in_hub))}</b> مورد "
                f"(از {_fa_digits(len(secs))} بخش)   ·   "
                f"هر صفحه: {_fa_digits(self.hub_page_size())}",
                "",
@@ -4563,15 +4841,26 @@ class Manager:
                f"{'✅ ثبت‌شده' if str(self.cfg.get('hub_intro') or '').strip() else '— (پیش‌فرض)'}",
                self.LINE,
                "<i>هر بخشی که در «🧩 بخش‌های آموزش» بسازی، خودکار این‌جا هم "
-               "می‌آید. با دکمه‌های زیر می‌توانی هر کدام را از فهرست "
-               "قایم/نمایان کنی.</i>"]
+               "می‌آید. با دکمه‌های زیر می‌توانی هر کدام را از این فهرست "
+               "قایم/نمایان کنی.</i>",
+               "",
+               "<b>توضیحاتِ پیش‌فرض:</b> تا وقتی هیچ بخشی در فهرست نداری، "
+               "برای مشتری توضیحِ قابلیت‌های ربات می‌رود (سلف، تبادل، "
+               "کیف پول، امتیاز، اشتراک، امنیت…). با «📥 تبدیل به بخش» "
+               "همه‌شان بخشِ قابل‌ویرایش می‌شوند؛ بعد متن هرکدام را از صفحه‌ی "
+               "همان بخش با «📝 متن بخش» به متنِ خودت عوض کن."]
         kb = [[B(("🔴 خاموش کردن" if self.hub_on() else "🟢 روشن کردن")
-                 + " دکمه‌ی «🗂 آموزش‌ها»", "a:hub_on",
+                 + " دکمه‌ی «🗂 توضیحات»", "a:hub_on",
                  "danger" if self.hub_on() else "success")],
               [B("👁 پیش‌نمایش فهرست", "a:hub_p", "primary"),
                B("📤 فرستادن همه", "a:hub_all", "success")],
               [B("📝 متن بالای صفحه", "a:hub_i", "primary"),
-               B("📄 تعداد در هر صفحه", "a:hub_pg", "primary")]]
+               B("📄 تعداد در هر صفحه", "a:hub_pg", "primary")],
+              [B(("📦 توضیحات پیش‌فرض: 🟢 روشن" if self.hub_defaults_on()
+                  else "📦 توضیحات پیش‌فرض: 🔴 خاموش"), "a:hub_def",
+                 "success" if self.hub_defaults_on() else "danger")],
+              [B("📥 تبدیل پیش‌فرض‌ها به بخش (قابل ویرایش)", "a:hub_mk",
+                 "success")]]
         if not secs:
             kb.append([B("➕ ساختن بخش", "a:secs", "success")])
         for s in secs:
@@ -4646,7 +4935,7 @@ class Manager:
                f"🔁 {'یک‌بار برای هر کاربر' if s['once'] else 'هر بار'}"
                f"   ·   🏷 سرتیتر: {'روشن' if s['header'] else 'خاموش'}\n"
                f"وضعیت: {'🟢 فعال' if s['on'] else '🔴 خاموش'}"
-               f"   ·   🗂 در فهرست آموزش‌ها: "
+               f"   ·   🗂 در فهرست توضیحات: "
                f"{'✅' if s.get('in_hub', True) else '⬜'}"
                + "\n".join(warn))
         kb = [
@@ -4666,8 +4955,8 @@ class Manager:
              B(("🔁 یک‌بار" if s["once"] else "♾ همیشه"), f"a:sec_once:{sid}")],
             [B(("🏷 سرتیتر ✅" if s["header"] else "🏷 سرتیتر ⚪"), f"a:sec_hdr:{sid}"),
              B(("🔴 خاموش" if s["on"] else "🟢 روشن"), f"a:sec_on:{sid}")],
-            [B(("🗂 در فهرست آموزش‌ها ✅" if s.get("in_hub", True)
-                else "🗂 در فهرست آموزش‌ها ⬜"), f"a:sec_hub:{sid}")],
+            [B(("🗂 در فهرست توضیحات ✅" if s.get("in_hub", True)
+                else "🗂 در فهرست توضیحات ⬜"), f"a:sec_hub:{sid}")],
             [B("🗑 حذف بخش", f"a:sec_rm:{sid}", "danger")],
             back_btn("a:secs")]
         return await self.edit(ev, txt, kb)
@@ -4833,7 +5122,7 @@ class Manager:
             await ans("در حال ارسال…")
             return await self.send_tutorial(uid)
 
-        # 🗂 آموزش‌ها — فهرستِ تپ‌کردنیِ همه‌ی آموزش‌ها
+        # 🗂 توضیحات — فهرستِ تپ‌کردنیِ همه‌ی توضیحات
         if data == "m:hub":
             await ans("در حال ارسال…")
             return await self.send_hub(uid)
@@ -4856,20 +5145,34 @@ class Manager:
             await ans("در حال ارسال همه…")
             return await self.hub_send_all(uid)
 
+        # تپِ یک توضیحِ پیش‌فرض: متنِ توضیح + دکمه‌ی همان کار + بازگشت به فهرست
+        if data.startswith("hub:d:"):
+            key = data.split(":", 2)[-1]
+            if not self.hub_defaults_on():
+                await ans("فعلاً موجود نیست")
+                return await self.edit(ev, "این توضیح فعلاً موجود نیست.",
+                                       [back_btn("m:hub")])
+            await ans("در حال ارسال…")
+            ok = await self.hub_send_default(uid, key)
+            if not ok:
+                return await self.edit(ev, "این توضیح فعلاً موجود نیست.",
+                                       [back_btn("m:hub")])
+            return
+
         # تپِ یک آموزش در فهرست: فقط همان آموزش می‌رود + دکمه‌ی بازگشت به فهرست
         if data.startswith("hub:s:"):
             sid = int(digits(data.split(":")[-1]) or 0)
             sec = self.tut_find(sid)
             if not sec or not sec["on"]:
-                await ans("این آموزش فعلاً موجود نیست")
-                return await self.edit(ev, "این آموزش فعلاً موجود نیست.",
+                await ans("این مورد فعلاً موجود نیست")
+                return await self.edit(ev, "این مورد فعلاً موجود نیست.",
                                        [back_btn("m:hub")])
             await ans("در حال ارسال…")
             ok = await self.tut_send_section(uid, sid, force=True,
                                              extra=self.hub_back_row())
             if not ok:
                 return await self.edit(ev,
-                    "⚠️ محتوای این آموزش ثبت نشده.\\n"
+                    "⚠️ محتوای این مورد ثبت نشده.\\n"
                     "اگر تازه اضافه شده، کمی بعد دوباره امتحان کن.",
                     [back_btn("m:hub")])
             return
@@ -5775,13 +6078,33 @@ class Manager:
             if k == "secs":
                 return await self.tut_admin_list(ev)
 
-            # ── 🗂 آموزش‌ها: فهرستِ تپ‌کردنیِ مشتری ──
+            # ── 🗂 توضیحات: فهرستِ تپ‌کردنیِ مشتری ──
             if k == "hub":
                 return await self.hub_admin(ev)
             if k == "hub_on":
                 self.cfg["hub_on"] = not self.hub_on()
                 self.db.log(uid, "hub_on", "1" if self.hub_on() else "0")
                 return await self.hub_admin(ev)
+            if k == "hub_def":
+                self.cfg["hub_defaults"] = not self.hub_defaults_on()
+                self.db.log(uid, "hub_defs",
+                            "1" if self.hub_defaults_on() else "0")
+                return await self.hub_admin(ev)
+            if k == "hub_mk":
+                made = await self.hub_make_sections()
+                for s in made:
+                    self.db.log(uid, "hub_mk", f"#{s['id']} {s['preset']}")
+                return await self.edit(ev,
+                    (f"✅ {_fa_digits(len(made))} مورد به بخش تبدیل شد:\n"
+                     + "\n".join(f"• {self.tut_sec_label(s)}"
+                                  for s in made)
+                     + "\n\n<i>حالا از «🧩 بخش‌های آموزش» هر کدام را باز کن و "
+                       "متنش را با «📝 متن بخش» به متنِ خودت عوض کن. "
+                       "دکمه‌ی پایانش هم همان‌جاست.</i>"
+                     if made else
+                     "ℹ️ همه‌ی پیش‌فرض‌ها قبلاً به بخش تبدیل شده‌اند."),
+                    [[B("🧩 بخش‌های آموزش", "a:secs", "success")],
+                     back_btn("a:hub")])
             if k == "hub_pg":
                 sizes = [4, 6, 8, 10, 12]
                 cur = self.hub_page_size()
@@ -5795,18 +6118,18 @@ class Manager:
                 return await self.edit(ev,
                     "👁 <b>پیش‌نمایش فهرست</b>\n"
                     "همان چیزی که مشتری می‌بیند برایت ارسال شد.\n"
-                    "<i>در پیش‌نمایش، تپِ هر آموزش هم کار می‌کند.</i>",
+                    "<i>در پیش‌نمایش، تپِ هر مورد هم کار می‌کند.</i>",
                     [back_btn("a:hub")])
             if k == "hub_all":
                 n = await self.hub_send_all(uid)
                 return await self.edit(ev,
-                    f"📤 {_fa_digits(n)} آموزش پشت‌سرهم فرستاده شد.",
+                    f"📤 {_fa_digits(n)} مورد پشت‌سرهم فرستاده شد.",
                     [back_btn("a:hub")])
             if k == "hub_i":
                 cur_txt = str(self.cfg.get("hub_intro") or "").strip()
                 self.fsm[uid] = {"step": "hub_intro"}
                 return await self.edit(ev,
-                    f"📝 <b>متن بالای «🗂 آموزش‌ها»</b>\n{self.LINE}\n"
+                    f"📝 <b>متن بالای «🗂 توضیحات»</b>\n{self.LINE}\n"
                     "این متن اولِ فهرست نشان داده می‌شود — مثلاً یک جمله "
                     "درباره‌ی اینکه هر آموزش را بزن تا بیاید.\n\n"
                     + (f"فعلی: {self._esc(cur_txt)}\n\n" if cur_txt else "")
@@ -10610,7 +10933,7 @@ class Manager:
                         [[B("👁 پیش‌نمایش", "a:cm:prev", "primary")],
                          [B("📋 دستورات آماده", "a:cm", "success")]])
 
-                # ── متنِ بالای «🗂 آموزش‌ها» ──
+                # ── متنِ بالای «🗂 توضیحات» ──
                 if stp == "hub_intro" and self.is_admin(uid):
                     self.fsm.pop(uid, None)
                     val = text.strip()
@@ -10620,11 +10943,11 @@ class Manager:
                     self.db.log(uid, "hub_intro",
                                 str(len(self.cfg["hub_intro"])))
                     return await self.say(ev.chat_id,
-                        "✅ متن بالای فهرست آموزش‌ها ذخیره شد."
+                        "✅ متن بالای فهرست توضیحات ذخیره شد."
                         if self.cfg["hub_intro"] else
                         "✅ متن بالای فهرست به حالت پیش‌فرض برگشت.",
                         [[B("👁 پیش‌نمایش فهرست", "a:hub_p", "primary")],
-                         [B("🗂 آموزش‌ها", "a:hub", "success")]])
+                         [B("🗂 توضیحات", "a:hub", "success")]])
 
                 if stp == "welcome_set" and self.is_admin(uid):
                     self.fsm.pop(uid, None)
