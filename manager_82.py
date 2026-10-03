@@ -1601,6 +1601,10 @@ DEFAULTS = {
     # هر مورد: {"title": عنوان، "cmd": دستور، "note": توضیح ساده}
     "cmd_items": [],
     "cmd_intro": "",        # متنِ بالای صفحه‌ی دستورات آماده (خالی = متن پیش‌فرض)
+    # ── 🗂 آموزش‌ها: فهرستِ تپ‌کردنیِ همه‌ی بخش‌ها ──
+    "hub_on": True,         # دکمه‌ی «🗂 آموزش‌ها» در منوی اصلی مشتری
+    "hub_intro": "",        # متنِ بالای فهرست (خالی = متن پیش‌فرض)
+    "hub_page_size": 8,     # چند آموزش در هر صفحه
     # ── فروشگاه ──
     "shop_on": True,
     "card_number": "",      # شماره کارت برای واریز
@@ -2523,7 +2527,7 @@ def B(text, data, style=None):
 
 def main_menu(is_admin=False, shop_on=True, points_on=True,
               has_session=False, running=False, trial_available=False,
-              has_cmds=False):
+              has_cmds=False, has_hub=True):
     rows = []
     # قدم اول همیشه بالا و برجسته
     # این دکمه همیشه باشد تا اکانت خارج‌شده یا اکانت قابل‌تعویض دوباره راه‌اندازی شود.
@@ -2547,6 +2551,9 @@ def main_menu(is_admin=False, shop_on=True, points_on=True,
                      B("🎁 زیرمجموعه", "m:ref", "success")])
         rows.append([B("🧾 سفارش‌ها", "m:orders", "primary"),
                      B("🎧 پشتیبانی", "m:support", "primary")])
+    # 🗂 آموزش‌ها — فهرستِ تپ‌کردنیِ همه‌ی آموزش‌ها (هر بخشی که مدیر بسازد)
+    if has_hub:
+        rows.append([B("🗂 آموزش‌ها", "m:hub", "success")])
     rows.append([B("📚 آموزش فعال‌سازی", "m:tut", "success"),
                  B("📖 راهنما", "m:help")])
     # فقط وقتی مدیر دستوری ثبت کرده باشد؛ وگرنه دکمه‌ی خالی می‌دهد.
@@ -2618,6 +2625,7 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B("🩺 سلامت سیستم", "a:doctor", "success")],
         [B("🎬 آموزش فعال‌سازی", "a:tut", "success"),
          B("🧩 بخش‌های آموزش", "a:secs", "success")],
+        [B("🗂 آموزش‌ها (فهرست تپ‌کردنی)", "a:hub", "success")],
         [B("📝 متن خوش‌آمدگویی", "a:welcome", "primary"),
          B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
         [B("📝 متن‌های ربات", "a:rt", "success"),
@@ -3954,6 +3962,8 @@ class Manager:
             "on": bool(s.get("on", True)),
             "once": bool(s.get("once", True)),
             "header": bool(s.get("header", False)),
+            # در فهرستِ «🗂 آموزشها» دیده شود؟ (پیشفرض بله)
+            "in_hub": bool(s.get("in_hub", True)),
             "note": str(s.get("note") or "")[:1000],
             "btn_label": str(s.get("btn_label") or "")[:40],
             "btn_cmd": str(s.get("btn_cmd") or "")[:64],
@@ -4235,7 +4245,8 @@ class Manager:
                 return []
         return [[B(label, cmd, "success")]]
 
-    async def tut_send_section(self, uid, sid, force=False, header=False, bare=False):
+    async def tut_send_section(self, uid, sid, force=False, header=False, bare=False,
+                               extra=None):
         """یک بخش را برای کاربر می‌فرستد: محتوا + (در آخر) دکمه‌ی پایان.
 
         force=True یعنی حتی اگر قبلاً رفته، دوباره برود (مثلاً کاربر خودش
@@ -4254,7 +4265,8 @@ class Manager:
             return False
         if s["once"] and not force and self.db.tut_done(uid, s["id"]):
             return False
-        buttons = self.tut_btn_rows(s)
+        # extra: ردیف‌دکمه‌های اضافی (مثلاً «🗂 همه‌ی آموزش‌ها» آخرِ آموزشِ فهرست)
+        buttons = self.tut_btn_rows(s) + [list(r) for r in (extra or [])]
         if bare and not buttons and s.get("preset") in dict(self.TUT_MENU_FOOT):
             # دکمه‌ی پایانِ همان کار هیچ‌وقت خالی نیست
             lbl, cmd = self.TUT_MENU_FOOT[s["preset"]]
@@ -4427,10 +4439,13 @@ class Manager:
     async def tut_send_menu(self, uid):
         """تگِ همه‌ی بخش‌های فعال را به کاربر نشان می‌دهد."""
         secs = self.tut_sections(on_only=True)
-        if not secs:
+        if not secs and not self.hub_on():
             return False
         kb = [[B(self.tut_sec_label(s), f"tut:s:{s['id']}", "success")]
               for s in secs]
+        if self.hub_on():
+            # فهرستِ همیشه‌در‌دسترس: همه‌ی آموزش‌ها یک‌جا، تپ‌کردنی
+            kb.append([B("🗂 همه‌ی آموزش‌ها (فهرست)", "m:hub", "primary")])
         kb.append([B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")])
         kb.append(back_btn())
         return await self.say(uid,
@@ -4438,7 +4453,137 @@ class Manager:
             f"{_fa_digits(len(secs))} بخش آماده است — هر کدام را خواستی بزن:",
             kb)
 
+    # ═══════════════════════════════════════════════
+    #  🗂 آموزش‌ها — فهرستِ تپ‌کردنیِ همه‌ی بخش‌ها
+    #  هر بخشی که در «🧩 بخش‌های آموزش» ساخته شود، خودکار این‌جا می‌آید؛
+    #  با «👁 در فهرست» می‌توانی هر کدام را از این صفحه قایم/نمایان کنی.
+    # ═══════════════════════════════════════════════
+    HUB_MAIN = ("📖 آموزش فعال‌سازی (کامل)", "m:tut")
+
+    def hub_on(self):
+        return bool(self.cfg.get("hub_on", True))
+
+    def hub_sections(self):
+        """بخش‌هایی که در فهرست «🗂 آموزش‌ها» دیده می‌شوند."""
+        return [s for s in self.tut_sections(on_only=True)
+                if s.get("in_hub", True)]
+
+    def hub_page_size(self):
+        try:
+            return min(20, max(2, int(self.cfg.get("hub_page_size", 8) or 8)))
+        except Exception:
+            return 8
+
+    def hub_pages(self):
+        n = len(self.hub_sections())
+        return max(1, (n + self.hub_page_size() - 1) // self.hub_page_size())
+
+    def hub_intro(self):
+        t = str(self.cfg.get("hub_intro") or "").strip()
+        if t:
+            return t
+        return ("🗂 <b>آموزش‌های جفج</b>\n" + self.LINE + "\n"
+                "هر آموزش را بزن تا همین‌جا برایت بیاید.\n"
+                "<i>ترتیب پیشنهادی: از بالا به پایین.</i>")
+
+    def hub_view(self, page=0):
+        """(متن, کیبورد) صفحه‌ی فهرست آموزش‌ها. صفحه‌ی ۱ = ۰."""
+        secs = self.hub_sections()
+        per = self.hub_page_size()
+        pages = max(1, (len(secs) + per - 1) // per)
+        try:
+            page = int(page or 0)
+        except (TypeError, ValueError):
+            page = 0
+        page = max(0, min(page, pages - 1))
+        items = secs[page * per:(page + 1) * per]
+
+        txt = [self.hub_intro(), self.LINE]
+        if pages > 1:
+            txt.append(f"📄 صفحه‌ی {_fa_digits(page + 1)} از {_fa_digits(pages)}")
+
+        kb = []
+        if page == 0:
+            lbl, cmd = self.HUB_MAIN
+            kb.append([B(lbl, cmd, "success")])
+        for s in items:
+            kb.append([B(self.tut_sec_label(s), f"hub:s:{s['id']}", "success")])
+
+        nav = []
+        if page > 0:
+            nav.append(B("⬅️ قبلی", f"hub:p:{page - 1}", "primary"))
+        if page < pages - 1:
+            nav.append(B("➡️ بعدی", f"hub:p:{page + 1}", "primary"))
+        if nav:
+            kb.append(nav)
+
+        if secs:
+            kb.append([B("📤 ارسال همه‌ی آموزش‌ها", "hub:all", "primary")])
+        else:
+            txt.append("")
+            txt.append("<i>هنوز آموزشی جز آموزش اصلی اضافه نشده.</i>")
+        kb.append(back_btn("m:home"))
+        return "\n".join(txt), kb
+
+    async def send_hub(self, uid, page=0):
+        txt, kb = self.hub_view(page)
+        return await self.say(uid, txt, kb, key=f"hub:{page}")
+
+    def hub_back_row(self):
+        """دکمه‌ی بازگشت به فهرست، آخرِ هر آموزشِ فرستاده‌شده."""
+        return [[B("🗂 همه‌ی آموزش‌ها", "hub:list", "primary")]]
+
+    async def hub_send_all(self, uid):
+        """همه‌ی آموزش‌های فهرست را به ترتیب (با فاصله‌ی خودِ هر بخش) می‌فرستد."""
+        n = 0
+        for s in self.hub_sections():
+            if s["delay"]:
+                await asyncio.sleep(min(10, int(s["delay"])))
+            if await self.tut_send_section(uid, s["id"], force=True,
+                                           extra=self.hub_back_row()):
+                n += 1
+        return n
+
     # ─────────── پنل مدیر: مدیریت بخش‌ها ───────────
+    async def hub_admin(self, ev):
+        """صفحه‌ی «🗂 آموزش‌ها» در پنل مدیر — تنظیم فهرستِ مشتری."""
+        secs = self.tut_sections()
+        in_hub = self.hub_sections()
+        txt = [f"🗂 <b>آموزش‌ها (فهرست تپ‌کردنی)</b>", self.LINE,
+               "مشتری دکمه‌ی «🗂 آموزش‌ها» را می‌زند و این‌جا هر آموزش را "
+               "با یک تپ می‌گیرد.",
+               self.LINE,
+               f"وضعیت دکمه در منوی مشتری: "
+               f"<b>{'🟢 روشن' if self.hub_on() else '🔴 خاموش'}</b>",
+               f"در فهرست: <b>{_fa_digits(len(in_hub))}</b> آموزش "
+               f"(از {_fa_digits(len(secs))} بخش)   ·   "
+               f"هر صفحه: {_fa_digits(self.hub_page_size())}",
+               "",
+               f"📝 متن بالای صفحه: "
+               f"{'✅ ثبت‌شده' if str(self.cfg.get('hub_intro') or '').strip() else '— (پیش‌فرض)'}",
+               self.LINE,
+               "<i>هر بخشی که در «🧩 بخش‌های آموزش» بسازی، خودکار این‌جا هم "
+               "می‌آید. با دکمه‌های زیر می‌توانی هر کدام را از فهرست "
+               "قایم/نمایان کنی.</i>"]
+        kb = [[B(("🔴 خاموش کردن" if self.hub_on() else "🟢 روشن کردن")
+                 + " دکمه‌ی «🗂 آموزش‌ها»", "a:hub_on",
+                 "danger" if self.hub_on() else "success")],
+              [B("👁 پیش‌نمایش فهرست", "a:hub_p", "primary"),
+               B("📤 فرستادن همه", "a:hub_all", "success")],
+              [B("📝 متن بالای صفحه", "a:hub_i", "primary"),
+               B("📄 تعداد در هر صفحه", "a:hub_pg", "primary")]]
+        if not secs:
+            kb.append([B("➕ ساختن بخش", "a:secs", "success")])
+        for s in secs:
+            mark = "✅" if s.get("in_hub", True) else "⬜"
+            kb.append([B(f"{mark} {self.tut_sec_label(s)}"
+                         + ("" if s["on"] else "  (🔴 خاموش)"),
+                         f"a:hub_t:{s['id']}",
+                         "success" if s.get("in_hub", True) else "primary")])
+        kb.append([B("🧩 مدیریت بخش‌ها", "a:secs", "success")])
+        kb.append(back_btn("a:home"))
+        return await self.edit(ev, "\n".join(txt), kb)
+
     async def tut_admin_list(self, ev):
         """صفحه‌ی «🧩 بخش‌های آموزش» در پنل مدیر."""
         secs = self.tut_sections()
@@ -4457,8 +4602,11 @@ class Manager:
                 parts.append("📝 متن")
             txt.append(f"{'🟢' if s['on'] else '⚪'} {self.tut_sec_label(s)} — "
                        f"{' + '.join(parts) or 'بدون محتوا'} — "
-                       f"{self.tut_when_label(s['when'])}")
-            kb.append([B(("🟢" if s["on"] else "⚪") + " " + self.tut_sec_label(s),
+                       f"{self.tut_when_label(s['when'])}"
+                       + ("" if s.get("in_hub", True) else " — 🚫 در فهرست نیست"))
+            kb.append([B(("🟢" if s["on"] else "⚪")
+                         + ("" if s.get("in_hub", True) else " 🚫")
+                         + " " + self.tut_sec_label(s),
                          f"a:sec:{s['id']}",
                          "success" if s["on"] else "primary")])
         missing = [k for k, _ in self.TUT_PRESETS if not self.tut_find_preset(k)]
@@ -4498,6 +4646,8 @@ class Manager:
                f"🔁 {'یک‌بار برای هر کاربر' if s['once'] else 'هر بار'}"
                f"   ·   🏷 سرتیتر: {'روشن' if s['header'] else 'خاموش'}\n"
                f"وضعیت: {'🟢 فعال' if s['on'] else '🔴 خاموش'}"
+               f"   ·   🗂 در فهرست آموزش‌ها: "
+               f"{'✅' if s.get('in_hub', True) else '⬜'}"
                + "\n".join(warn))
         kb = [
             [B("📤 ثبت / تغییر محتوا", f"a:sec_set:{sid}", "success")],
@@ -4516,6 +4666,8 @@ class Manager:
              B(("🔁 یک‌بار" if s["once"] else "♾ همیشه"), f"a:sec_once:{sid}")],
             [B(("🏷 سرتیتر ✅" if s["header"] else "🏷 سرتیتر ⚪"), f"a:sec_hdr:{sid}"),
              B(("🔴 خاموش" if s["on"] else "🟢 روشن"), f"a:sec_on:{sid}")],
+            [B(("🗂 در فهرست آموزش‌ها ✅" if s.get("in_hub", True)
+                else "🗂 در فهرست آموزش‌ها ⬜"), f"a:sec_hub:{sid}")],
             [B("🗑 حذف بخش", f"a:sec_rm:{sid}", "danger")],
             back_btn("a:secs")]
         return await self.edit(ev, txt, kb)
@@ -4622,7 +4774,8 @@ class Manager:
                                              "sec_delay", "sec_note", "sec_btn_url",
                                              "sec_btn_label", "sec_text", "tut_wait",
                                              "rt_set",
-                                             "cm_add", "cm_edit", "cm_intro"):
+                                             "cm_add", "cm_edit", "cm_intro",
+                                             "hub_intro"):
             keep = data in ("wq:0", "kc:x", "a:tut_done") \
                 or data.startswith(("a:sec_done",)) or (
                 st_now.get("step") in ("verify_phone", "verify_referral") and data.startswith(("ko:", "o:", "wq:", "kc:", "kp:")))
@@ -4644,7 +4797,8 @@ class Manager:
                                    bool((self.db.get(uid) or {}).get("session")),
                                    self.sup.is_running(uid),
                                    self.trial_available(uid),
-                                   has_cmds=self.has_cmds()))
+                                   has_cmds=self.has_cmds(),
+                                   has_hub=self.hub_on()))
         if not adm and not data.startswith("a:") and data != "m:home":
             if await self.enforce_join(uid, ev=ev, chat=ev.chat_id):
                 await ans("اول عضو شو")
@@ -4660,7 +4814,8 @@ class Manager:
                                    bool((self.db.get(uid) or {}).get("session")),
                                    self.sup.is_running(uid),
                                    self.trial_available(uid),
-                                   has_cmds=self.has_cmds()))
+                                   has_cmds=self.has_cmds(),
+                                   has_hub=self.hub_on()))
 
         if data == "m:trial":
             await ans()
@@ -4677,6 +4832,47 @@ class Manager:
         if data == "m:tut":
             await ans("در حال ارسال…")
             return await self.send_tutorial(uid)
+
+        # 🗂 آموزش‌ها — فهرستِ تپ‌کردنیِ همه‌ی آموزش‌ها
+        if data == "m:hub":
+            await ans("در حال ارسال…")
+            return await self.send_hub(uid)
+
+        if data.startswith("hub:p:"):
+            # ورق‌زدن فهرست: همان پیام ویرایش می‌شود (چت مشتری شلوغ نمی‌شود)
+            try:
+                pg = int(digits(data.split(":")[-1]) or 0)
+            except Exception:
+                pg = 0
+            txt, kb = self.hub_view(pg)
+            await ans()
+            return await self.edit(ev, txt, kb)
+
+        if data == "hub:list":
+            await ans("در حال ارسال…")
+            return await self.send_hub(uid)
+
+        if data == "hub:all":
+            await ans("در حال ارسال همه…")
+            return await self.hub_send_all(uid)
+
+        # تپِ یک آموزش در فهرست: فقط همان آموزش می‌رود + دکمه‌ی بازگشت به فهرست
+        if data.startswith("hub:s:"):
+            sid = int(digits(data.split(":")[-1]) or 0)
+            sec = self.tut_find(sid)
+            if not sec or not sec["on"]:
+                await ans("این آموزش فعلاً موجود نیست")
+                return await self.edit(ev, "این آموزش فعلاً موجود نیست.",
+                                       [back_btn("m:hub")])
+            await ans("در حال ارسال…")
+            ok = await self.tut_send_section(uid, sid, force=True,
+                                             extra=self.hub_back_row())
+            if not ok:
+                return await self.edit(ev,
+                    "⚠️ محتوای این آموزش ثبت نشده.\\n"
+                    "اگر تازه اضافه شده، کمی بعد دوباره امتحان کن.",
+                    [back_btn("m:hub")])
+            return
 
         # 📋 دستورات آماده — راهنمای مرحله‌به‌مرحله‌ی فعال‌سازی سلف
         if data == "m:cmds":
@@ -5578,6 +5774,56 @@ class Manager:
             # ── بخش‌بندی آموزش (تگ‌ها) ──
             if k == "secs":
                 return await self.tut_admin_list(ev)
+
+            # ── 🗂 آموزش‌ها: فهرستِ تپ‌کردنیِ مشتری ──
+            if k == "hub":
+                return await self.hub_admin(ev)
+            if k == "hub_on":
+                self.cfg["hub_on"] = not self.hub_on()
+                self.db.log(uid, "hub_on", "1" if self.hub_on() else "0")
+                return await self.hub_admin(ev)
+            if k == "hub_pg":
+                sizes = [4, 6, 8, 10, 12]
+                cur = self.hub_page_size()
+                nxt = sizes[(sizes.index(cur) + 1) % len(sizes)] \
+                    if cur in sizes else 8
+                self.cfg["hub_page_size"] = nxt
+                self.db.log(uid, "hub_pg", str(nxt))
+                return await self.hub_admin(ev)
+            if k == "hub_p":
+                await self.send_hub(uid)
+                return await self.edit(ev,
+                    "👁 <b>پیش‌نمایش فهرست</b>\n"
+                    "همان چیزی که مشتری می‌بیند برایت ارسال شد.\n"
+                    "<i>در پیش‌نمایش، تپِ هر آموزش هم کار می‌کند.</i>",
+                    [back_btn("a:hub")])
+            if k == "hub_all":
+                n = await self.hub_send_all(uid)
+                return await self.edit(ev,
+                    f"📤 {_fa_digits(n)} آموزش پشت‌سرهم فرستاده شد.",
+                    [back_btn("a:hub")])
+            if k == "hub_i":
+                cur_txt = str(self.cfg.get("hub_intro") or "").strip()
+                self.fsm[uid] = {"step": "hub_intro"}
+                return await self.edit(ev,
+                    f"📝 <b>متن بالای «🗂 آموزش‌ها»</b>\n{self.LINE}\n"
+                    "این متن اولِ فهرست نشان داده می‌شود — مثلاً یک جمله "
+                    "درباره‌ی اینکه هر آموزش را بزن تا بیاید.\n\n"
+                    + (f"فعلی: {self._esc(cur_txt)}\n\n" if cur_txt else "")
+                    + "متن جدید را بفرست؛ برای برگشت به متن پیش‌فرض بنویس: "
+                    "<code>-</code>\n"
+                    "<i>/cancel برای لغو</i>",
+                    [back_btn("a:hub")])
+            if k.startswith("hub_t:"):
+                sid = int(digits(k.split(":")[-1]) or 0)
+                s = self.tut_find(sid)
+                if not s:
+                    return await self.edit(ev, "این بخش پیدا نشد.",
+                                           [back_btn("a:hub")])
+                new_val = not bool(s.get("in_hub", True))
+                self.tut_update(sid, in_hub=new_val)
+                self.db.log(uid, "hub_sec", f"#{sid} {int(new_val)}")
+                return await self.hub_admin(ev)
             # ── سه متنِ آماده: کیف پول / خرید امتیاز / بعد از فعال‌سازی ──
             if k == "sec_tpl":
                 kb = []
@@ -5793,7 +6039,7 @@ class Manager:
                 self.tut_move(sid, -1 if up else 1)
                 return await self.tut_admin_one(ev, sid)
             if k.startswith("sec_once:") or k.startswith("sec_hdr:") or \
-                    k.startswith("sec_on:"):
+                    k.startswith("sec_on:") or k.startswith("sec_hub:"):
                 key, sid_s = k.split(":", 1)
                 sid = int(digits(sid_s) or 0)
                 s = self.tut_find(sid)
@@ -5801,7 +6047,7 @@ class Manager:
                     return await self.edit(ev, "این بخش پیدا نشد.",
                                            [back_btn("a:secs")])
                 field = {"sec_once": "once", "sec_hdr": "header",
-                         "sec_on": "on"}[key]
+                         "sec_on": "on", "sec_hub": "in_hub"}[key]
                 self.tut_update(sid, **{field: not s[field]})
                 return await self.tut_admin_one(ev, sid)
             if k.startswith("sec_clr:"):
@@ -6859,7 +7105,8 @@ class Manager:
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
                                    self.trial_available(uid),
-                                   has_cmds=self.has_cmds()))
+                                   has_cmds=self.has_cmds(),
+                                   has_hub=self.hub_on()))
 
         if cmd == "trial":
             return await self.start_trial(uid, chat)
@@ -6883,7 +7130,8 @@ class Manager:
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
                                    self.trial_available(uid),
-                                   has_cmds=self.has_cmds()))
+                                   has_cmds=self.has_cmds(),
+                                   has_hub=self.hub_on()))
 
         if cmd == "setup":
             return await self.setup_start(uid, chat)
@@ -6982,7 +7230,8 @@ class Manager:
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
                                    self.trial_available(uid),
-                                   has_cmds=self.has_cmds()))
+                                   has_cmds=self.has_cmds(),
+                                   has_hub=self.hub_on()))
 
         if cmd == "stats":
             cnt = self.db.counts()
@@ -9978,7 +10227,8 @@ class Manager:
                                                 bool((self.db.get(uid) or {}).get("session")),
                                                 self.sup.is_running(uid),
                                    self.trial_available(uid),
-                                   has_cmds=self.has_cmds()))
+                                   has_cmds=self.has_cmds(),
+                                   has_hub=self.hub_on()))
 
             ev_phone, _oid = event_phone(ev)
             if (not self.is_admin(uid)
@@ -10360,6 +10610,22 @@ class Manager:
                         [[B("👁 پیش‌نمایش", "a:cm:prev", "primary")],
                          [B("📋 دستورات آماده", "a:cm", "success")]])
 
+                # ── متنِ بالای «🗂 آموزش‌ها» ──
+                if stp == "hub_intro" and self.is_admin(uid):
+                    self.fsm.pop(uid, None)
+                    val = text.strip()
+                    self.cfg["hub_intro"] = "" if val in ("-", "—", "خالی",
+                                                          "پاک", "حذف",
+                                                          "پیش‌فرض") else val[:800]
+                    self.db.log(uid, "hub_intro",
+                                str(len(self.cfg["hub_intro"])))
+                    return await self.say(ev.chat_id,
+                        "✅ متن بالای فهرست آموزش‌ها ذخیره شد."
+                        if self.cfg["hub_intro"] else
+                        "✅ متن بالای فهرست به حالت پیش‌فرض برگشت.",
+                        [[B("👁 پیش‌نمایش فهرست", "a:hub_p", "primary")],
+                         [B("🗂 آموزش‌ها", "a:hub", "success")]])
+
                 if stp == "welcome_set" and self.is_admin(uid):
                     self.fsm.pop(uid, None)
                     self.cfg["welcome"] = "" if text.lower() in ("خاموش", "پاک", "حذف", "-") else text[:2000]
@@ -10560,7 +10826,8 @@ class Manager:
                               bool((self.db.get(uid) or {}).get("session")),
                               self.sup.is_running(uid),
                                    self.trial_available(uid),
-                                   has_cmds=self.has_cmds()))
+                                   has_cmds=self.has_cmds(),
+                                   has_hub=self.hub_on()))
 
             if not text.startswith("/"):
                 return await self.say(ev.chat_id, "/help را بزن.")
