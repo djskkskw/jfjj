@@ -1,6 +1,6 @@
 # نقشهٔ کامل تست‌ها — چه چیزی واقعاً تست شده، چه چیزی فقط ادعا شده
 
-> جمع‌بندی: **۳۵ فایل تست / ۱۳٬۰۴۶ خط / ۱۵۷۰+ سنجه**. همه در وضعیت فعلی **سبز**.
+> جمع‌بندی: **۳۶ فایل تست / ۱۳٬۰۴۶+ خط / ۱۶۰۰+ سنجه**. همه در وضعیت فعلی **سبز** (به‌جز `test_tutorial_hub.py` که از قبل خراب است).
 > اجرا: `python3 tests/test_<name>.py` (هر فایل مستقل و self-contained است؛ نیازی به pytest نیست).
 
 ---
@@ -39,7 +39,7 @@
 | `test_shutdown_cancel.py` | ۴ سناریو: `_shutdown` وسط عملیات ادعا → هشدار + await + نشانهٔ done (کنسل نرم)؛ خروج اجباریِ setup لاگین گیرکرده را می‌کشد؛ بعد از shutdown کروتن‌های لاگین نادیده گرفته می‌شوند (رگرسیون `capture_for_agent`)؛ backoff نمایی واقعی `1→2→4→8s` |
 | `test_timers.py` | `calc_checkin` با جیتر ۶ساعت+۶۰دقیقه (سقف طول شناسه)؛ `relink_checkin` ۲ ساعت؛ `renew_reminder` روزهای [۳,۱] با واژه‌های فارسی؛ ترکیب ساعت/دقیقهٔ `startup_delay`؛ قالب `seconds_minutes_format` |
 
-### ب) ترکیبی — رفتاری + تأیید متنِ کد (۱۵ فایل، ۱۱۳ تأیید متنی)
+### ب) ترکیبی — رفتاری + تأیید متنِ کد (۱۶ فایل)
 
 | تست | رفتاری (واقعاً اجرا می‌شود) | فقط-متنی (`in src`) |
 |---|---|---|
@@ -58,6 +58,7 @@
 | `test_spacing_algorithm.py` | `compute_action_gap` با RNG بذردار: بازهٔ پایه [۳۰–۶۰]، افزایش ساعت/فلوت ×۱۰، سقف فلوت ۱۲۰، decay پنجرهٔ hard-until (۲۰s/ساعت)، عدم سقوط زیر پایه؛ `display_gap` «۶٫۵ ثانیه» | ۲: کلیدهای config در `adaptive_config` |
 | `test_exchange_reply_timing.py` | `wait_for_allow` با جیتر GAP در [۳–۱۵]s؛ جیتر پیش‌فرض بررسی دسترسی [۸–۲۵]s | ۱: مهاجرت interval 20→30 + نام‌های رزروشدهٔ ExCooldown |
 | `test_claim_text.py` | `ex_render` واقعی روی موتور: متن ادعای ناموفق (بدون لینکِ طرف)، fallback «سفارشیِ ناموفق»، جریان ذخیره/نمایش/حذف متن سفارشی از config | ۱ |
+| `test_return_wait_window.py` | «مهلت بازگشت پیش‌قدم» با حلقه‌های واقعی (استخراج‌شده از 95.py) و دیتابیس واقعی: داخل مهلت → بدون اخطار/لفت فقط یادآوریِ فاصله‌دار؛ تأییدِ عضویت → `member_ok_at` و پایان مهلت؛ بعد از تأیید → ۲ نبودنِ تأییدشده = لفت (تقلب‌کار)؛ `return_wait_minutes=0` → رفتار قدیمی؛ لفتِ ناموفق → `ex_leave_fail` و آمارِ لفت دست‌نخورده؛ دستور `تبادل مهلت پیشقدم` | ۴: پیش‌فرض ۱۸۰، ستون `member_ok_at`، رویداد `ex_return_wait`، جدا شدن `ex_leave_fail` از `ex_left` |
 
 ---
 
@@ -68,7 +69,7 @@
 | نصب/لاگین (StringSession/QR/کد) | `login_bot`، `selfbot_paths`، `railway_selfbot_bootstrap` | عمیق (با fake telethon) |
 | احراز مالکیت فروشگاه | `claim_flow_fixes`، `claim_text` | عمیق |
 | پشتیبان‌گیری/بازیابی GitHub→تلگرام | `backup_restore`، `backup_single_message` | عمیق (حمل‌ونقل جعلی) |
-| موتور تعویض اکانت + سریال‌سازی عملیات | `op_serialization`، `exchange_group_gate`، `exchange_notjoined_flow`، `exchange_reply_timing`، `say_dedup`، `saved_panel` | عمیق |
+| موتور تعویض اکانت + سریال‌سازی عملیات | `op_serialization`، `exchange_group_gate`، `exchange_notjoined_flow`، `exchange_reply_timing`، `return_wait_window`، `claim_flow_fixes`، `leave_expired_invite`، `say_dedup`، `saved_panel` | عمیق |
 | فلوت تطبیقی/مدارشکن/گپ | `spacing_algorithm`، `check_gate_flood`، `flood_circuit_breaker`، `round2_update` | عمیق |
 | پاسخ خودکار متن آزاد | `unknown_fallback` | عمیق |
 | پنل و سیستم آموزش | `menu_tutorials`، `tutorial`، `tutorial_presets`، `tutorial_sections`، `tutorial_hub` | عمیق |

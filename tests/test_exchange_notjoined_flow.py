@@ -23,7 +23,9 @@ The new behaviour this test pins down (round2 fix):
     never back to back, and never a third one;
   * after both reminders, if the peer still has not joined, the bot
     LEAVES the peer's channel (or cancels the exchange if it had not
-    joined it yet);
+    joined it yet); the only exception is a fresh «پیش‌قدم» (initiate)
+    record inside its ``return_wait_minutes`` window, where the leave is
+    suspended so the partner actually gets a chance to come back;
   * if the msg_no text was never configured, the default is «نیومدی»;
   * defaults: max_reminders=2, reminder gap 20–40 s random.
 
@@ -461,17 +463,25 @@ class Stub:
     def check_delay():
         return 15
 
-def mkRec(peer, link, status, reminders, direction="in", due=True):
+def mkRec(peer, link, status, reminders, direction="in", due=True,
+          joined_at=None):
     r, _n = eng.db.ex_add(peer, f"p{peer}", link)
-    eng.db.ex_set(r["id"], status=status, direction=direction,
-                  reminders=reminders, peer_id=peer,
-                  src_chat=111, src_msg=222,
-                  next_reminder=int(time.time()) - 5 if due else 0)
+    kw = {"status": status, "direction": direction,
+          "reminders": reminders, "peer_id": peer,
+          "src_chat": 111, "src_msg": 222,
+          "next_reminder": int(time.time()) - 5 if due else 0}
+    if joined_at:
+        kw["joined_at"] = joined_at
+    eng.db.ex_set(r["id"], **kw)
     return eng.db.ex_get(r["id"])
 
-stub = Stub({501: False, 502: False, 503: False, 504: True})
+stub = Stub({501: False, 502: False, 503: False, 504: True, 507: False})
 r1 = mkRec(501, "@c501", "pending", 1)     # 2nd reminder due → send + schedule leave-check
-r2 = mkRec(502, "@c502", "joined", 2, "out")  # both sent, never came → LEAVE
+# مهلت بازگشت گذشته (joined_at قدیمی) → بعد از دو یادآوری، لفت می‌شود
+r2 = mkRec(502, "@c502", "joined", 2, "out",
+           joined_at=int(time.time()) - 400 * 60)
+# پیش‌قدمِ تازه داخلِ مهلت بازگشت → هنوز لفت نمی‌شود
+r2b = mkRec(507, "@c507", "joined", 2, "out")
 r3 = mkRec(503, "@c503", "pending", 2)     # both sent, not joined yet → CANCEL
 r4 = mkRec(504, "@c504", "pending", 1)     # member now → APPROVE for join
 x2 = eng.ex_cfg()
@@ -497,6 +507,13 @@ assert g2["next_reminder"] == 0
 assert x2.get("_scan_now") is True, "out-direction leave did not trigger scan"
 assert any("لفت" in n for n in stub.notes), "owner got no leave note"
 print("OK S2 leave after two ignored reminders")
+
+g2b = eng.db.ex_get(r2b["id"])
+print("S2b left", stub.left, "status", g2b["status"], "note", g2b.get("note"))
+assert r2b["link"] not in stub.left, "in-window initiate was left too early"
+assert g2b["status"] == "joined", "in-window initiate lost its joined status"
+assert g2b["next_reminder"] == 0, "in-window record kept a reminder window"
+print("OK S2b «مهلت بازگشت پیش‌قدم» جلوی لفت زودهنگام را گرفت")
 
 g3 = eng.db.ex_get(r3["id"])
 print("S3 status", g3["status"], "left", stub.left)

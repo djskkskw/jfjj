@@ -341,19 +341,25 @@ class Stub:
         return 15
 
 
-def mkRec(eng, peer, link, status, reminders=0, direction="in"):
+def mkRec(eng, peer, link, status, reminders=0, direction="in",
+          joined_at=None):
     r, _n = eng.db.ex_add(peer, "p%d" % peer, link)
     now = int(time.time())
-    eng.db.ex_set(r["id"], status=status, direction=direction,
-                  reminders=reminders, peer_id=peer,
-                  src_chat=111, src_msg=222, next_reminder=now - 5,
-                  next_check=0, last_check=0)
+    kw = {"status": status, "direction": direction,
+          "reminders": reminders, "peer_id": peer,
+          "src_chat": 111, "src_msg": 222, "next_reminder": now - 5,
+          "next_check": 0, "last_check": 0}
+    if joined_at:
+        kw["joined_at"] = joined_at
+    eng.db.ex_set(r["id"], **kw)
     return eng.db.ex_get(r["id"])
 
 
 eng = fresh_engine()
 stub = Stub(member=False, leave_ok=False)
-r = mkRec(eng, 7010, "@c7010", "joined", reminders=2, direction="out")
+# مهلت بازگشت پیش‌قدم گذشته → مسیر عادیِ لفت/عقب‌نشینی تست می‌شود
+r = mkRec(eng, 7010, "@c7010", "joined", reminders=2, direction="out",
+          joined_at=int(time.time()) - 400 * 60)
 asyncio.run(run_reminder(eng, eng.ex_cfg(), stub))
 g = eng.db.ex_get(r["id"])
 now = int(time.time())

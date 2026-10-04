@@ -221,7 +221,10 @@ def mkrec(peer, link, status="pending", reminders=0, direction="in"):
     r, _n = eng.db.ex_add(peer, "p%d" % peer, link)
     eng.db.ex_set(r["id"], status=status, direction=direction,
                   reminders=reminders, peer_id=peer, src_chat=11, src_msg=22,
-                  next_reminder=int(time.time()) - 5, unk_streak=0)
+                  next_reminder=int(time.time()) - 5, unk_streak=0,
+                  # «جوین‌شده»ی این تست‌ها قبلاً عضویتش تأیید شده است؛
+                  # مهلت بازگشت پیش‌قدم نباید منطق نامشخص/لفت را عوض کند.
+                  member_ok_at=int(time.time()) - 3600)
     return eng.db.ex_get(r["id"])
 
 r1 = mkrec(9001, "@u9001")
@@ -305,6 +308,9 @@ def mkjoined(peer, link, replied=1, strikes=0):
     eng.db.ex_set(r["id"], status="joined", peer_id=peer, replied=replied,
                   strikes=strikes, direction="out", src_chat=11, src_msg=22,
                   joined_at=int(time.time()) - 60,
+                  # عضو بودنش قبلاً تأیید شده → مهلت بازگشت پیش‌قدم
+                  # نباید منطق نامشخص/لفت این تست‌ها را عوض کند.
+                  member_ok_at=int(time.time()) - 3600,
                   next_check=int(time.time()) - 5, next_reminder=0,
                   unk_streak=0)
     return eng.db.ex_get(r["id"])

@@ -173,7 +173,9 @@ def mkRec(eng, peer, link, status, reminders=0, direction="in",
 # ════════════════════════════════════════════════════════════
 eng = fresh_engine()
 stub = Stub(member_map={601: False}, send_ok=False)   # ارسال همیشه fail
-r = mkRec(eng, 601, "@fix601", "joined", direction="out")
+# توجه: این تست مسیر «شکست ارسال» را می‌سنجد، نه مهلت بازگشت
+# پیش‌قدم؛ پس رکورد از نوع ورودی است تا مهلت رویش اثر نگذارد.
+r = mkRec(eng, 601, "@fix601", "joined", direction="in")
 
 asyncio.run(run_reminder(eng, eng.ex_cfg(), stub))
 g = eng.db.ex_get(r["id"])
@@ -228,7 +230,8 @@ print("DONE F2 unknown bound + owner warning")
 
 
 # ════════════════════════════════════════════════════════════
-# F3 — چک دوره‌ای: تازه‌کارِ بی‌ادعا اول «نیومدی» می‌شنود، بعد لفت
+# F3 — چک دوره‌ای: پیش‌قدمِ تازه داخلِ «مهلت بازگشت» لفت نمی‌خورد؛
+# بعد از پایان مهلت، دور «نیومدی» و بعد لفت (رفتار عادی)
 # ════════════════════════════════════════════════════════════
 a = src.find("# ۳) چک دوره‌ای")
 b = src.find("# برای دقت فاصله‌ی یادآوری", a)
@@ -268,21 +271,35 @@ x["enabled"] = True
 r = mkRec(eng, 603, "@fix603", "joined", direction="out", replied=0,
           due_rem=False, due_check=True)
 
+# داخل مهلت بازگشت پیش‌قدم: فقط یک «نیومدی»ِ فاصله‌دار؛ نه اخطار، نه لفت
 asyncio.run(run_periodic(eng, x, stub))
 g = eng.db.ex_get(r["id"])
 check(r["link"] not in stub.left and g["status"] == "joined",
-      "F3: اولین نبودنِ بی‌ادعا → هنوز لفت نمی‌خورد")
+      "F3: داخل مهلت بازگشت → لفت نمی‌خورد")
 check(g["reminders"] == 1 and len(stub.sent) == 1,
       "F3: اولین «نیومدی» رفت (قبلاً لفت بی‌هشدار بود)")
-check(g["strikes"] == 1 and g["next_reminder"] > int(time.time()),
-      "F3: دور یادآوری شروع شد (next_reminder آینده)")
-check(g["next_check"] == 0, "F3: چک دوره‌ای تا پایان دور یادآوری دست نمی‌زند")
+check(g["strikes"] == 0, "F3: داخل مهلت، نبودن اخطارِ لفت حساب نشد")
+check(g["next_check"] > int(time.time()) + 60,
+      "F3: چکِ بعدی با فاصله‌ی بلندِ مهلت زمان‌بندی شد")
+check(g["next_reminder"] == 0,
+      "F3: یادآوری بعدی به حلقه‌ی نگهبانی سپرده شد (بدون پیام پشت‌سرهم)")
+
+# مهلت تمام شد → منطق عادی: نبودنِ اول = اخطار + «نیومدی»
+eng.db.ex_set(r["id"],
+              joined_at=int(time.time()) - 400 * 60,
+              next_check=int(time.time()) - 5)
+asyncio.run(run_periodic(eng, x, stub))
+g = eng.db.ex_get(r["id"])
+check(r["link"] not in stub.left and g["strikes"] == 1,
+      "F3: بعد از پایان مهلت، نبودنِ اول فقط اخطار است")
+check(g["reminders"] == 1 and len(stub.sent) == 2,
+      "F3: بعد از مهلت، «نیومدی» رفت و دورِ تازه شروع شد")
 
 # دور یادآوری: دومین «نیومدی» → بعدش لفت
 eng.db.ex_set(r["id"], next_reminder=int(time.time()) - 5)
 asyncio.run(run_reminder(eng, x, stub))
 g = eng.db.ex_get(r["id"])
-check(g["reminders"] == 2 and len(stub.sent) == 2, "F3: دومین «نیومدی» رفت")
+check(g["reminders"] == 2 and len(stub.sent) == 3, "F3: دومین «نیومدی» رفت")
 eng.db.ex_set(r["id"], next_reminder=int(time.time()) - 5)
 asyncio.run(run_reminder(eng, x, stub))
 g = eng.db.ex_get(r["id"])
@@ -299,7 +316,9 @@ stub = Stub(member_map={604: False}, send_ok=True)
 x = eng.ex_cfg()
 x["enabled"] = True
 x["max_strikes"] = 2
-r = mkRec(eng, 604, "@fix604", "joined", direction="out", replied=1,
+# تقلب‌کننده یعنی کسی که قبلاً عضو کانال من بوده و بعد لفت داده؛
+# چنین رکوردی ورودی است و مهلت بازگشت پیش‌قدم شاملش نمی‌شود.
+r = mkRec(eng, 604, "@fix604", "joined", direction="in", replied=1,
           due_rem=False, due_check=True)
 
 # نبودنِ اول: هنوز لفت نمی‌دهیم (محافظت در برابر منفیِ کاذب)؛ فقط اخطار.

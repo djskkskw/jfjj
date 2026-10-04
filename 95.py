@@ -150,6 +150,14 @@ DEFAULTS = {
         # بعد از این تعداد پیام «عضو نیست»، اگر طرف هنوز نیامده باشد از
         # کانالش لفت می‌دهیم (یا اگر هنوز جوین نشده‌ایم، تبادل لغو می‌شود).
         "max_reminders": 2,
+        # ── مهلت بازگشت «پیشقدم» ──
+        # در حالت پیش‌قدم، ربات اول جوین می‌شود و طرف باید برگردد و عضو
+        # کانال ما شود. تا این «برگشت» ثابت نشده، نبودنِ طرف دلیلِ لفت
+        # نیست (او ممکن است هنوز آنلاین نشده باشد). تا پایان این مهلت
+        # (دقیقه) هیچ اخطار/لفتی شمرده نمی‌شود و فقط چند یادآوریِ
+        # فاصله‌دار می‌رود؛ بعد از آن منطق عادی اخطار/لفت اجرا می‌شود.
+        # ۰ = رفتار قدیمی (لفتِ سریع). تنظیم: `تبادل مهلت پیشقدم ۱۸۰`
+        "return_wait_minutes": 180,
         # ── حالت پیش‌قدم: خودت اول جوین می‌شوی ──
         "initiate": True,         # پیش‌فرض روشن
         "scan_every_sec": 30,     # پیش‌قدم: هر ۳۰ ثانیه پیام‌های جدید را می‌بیند
@@ -505,7 +513,8 @@ CREATE TABLE IF NOT EXISTS exchange (
     chat_id INTEGER,
     chat_hash INTEGER,
     leave_fail INTEGER NOT NULL DEFAULT 0,
-    leave_blocked_until INTEGER NOT NULL DEFAULT 0
+    leave_blocked_until INTEGER NOT NULL DEFAULT 0,
+    member_ok_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_ex ON exchange(status, last_check);
 CREATE TABLE IF NOT EXISTS events (
@@ -538,7 +547,8 @@ class DB:
                               ("unk_streak", "INTEGER NOT NULL DEFAULT 0"),
                               ("chat_id", "INTEGER"), ("chat_hash", "INTEGER"),
                               ("leave_fail", "INTEGER NOT NULL DEFAULT 0"),
-                              ("leave_blocked_until", "INTEGER NOT NULL DEFAULT 0")):
+                              ("leave_blocked_until", "INTEGER NOT NULL DEFAULT 0"),
+                              ("member_ok_at", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in have:
                     self.conn.execute(f"ALTER TABLE exchange ADD COLUMN {col} {decl}")
             # بعد از مهاجرت ساخته شود؛ وگرنه دیتابیس قدیمی هنوز ستون next_check ندارد.
@@ -1595,6 +1605,7 @@ HELP = """🤖 راهنمای جفج
 تبادل زمان پاسخ ۱۵ — تأخیر پاسخ بعد از Join واقعی
 تبادل اخطار ۲ — بعد از دو بار نبودنِ تأییدشده لفت بده (این پیام نیست؛ پیش‌فرض ۲)
 تبادل تعداد یادآوری ۲ — دو پیام «نیومدی» با فاصله؛ بعد از آن لفت (پیش‌فرض ۲؛ ۰ = بدون پیام)
+تبادل مهلت پیشقدم ۱۸۰ — مهلت بازگشتِ پیش‌قدم: تا این مدت نبودنِ طرف اخطار/لفت نیست (۰ = خاموش)
 تبادل فاصله یادآوری ۲۰ ۴۰ — فاصله تصادفی بین دو پیام «نیومدی» (پیش‌فرض)
 تبادل فاصله عملکرد ۱۵ ۲۰ — هیچ دو عملکردی پشت‌سرهم نمی‌روند: چک/جوین/لفت/پیام
                               یکی تمام شود، ۱۵–۲۰ ثانیه صبر، بعدی اجرا شود
@@ -2751,6 +2762,10 @@ class Engine:
             ("گزارش الان", "report_now"),
             ("گزارش هر", "report_every"),
             ("گزارش", "report"),
+            ("مهلت پیش‌قدم", "return_wait"),
+            ("مهلت پیشقدم", "return_wait"),
+            ("مهلت پیش قدم", "return_wait"),
+            ("مهلت بازگشت", "return_wait"),
             ("فاصله یادآوری", "reminder_gap"),
             ("نوسان یادآوری", "reminder_gap"),
             ("فاصله عملکرد", "op_gap"),
@@ -3341,6 +3356,38 @@ class Engine:
             self.st.save()
             return f"🔔 فاصله یادآوری «نیومدی» و چک عضویت: **{fa(lo)}–{fa(hi)} ثانیه تصادفی** — دوبار «نیومدی» بعد لفت، هر بار رندوم"
 
+        if sub == "return_wait":
+            if not rest:
+                v = max(0, min(1440, int(x.get("return_wait_minutes", 180) or 0)))
+                if v:
+                    return (f"⏳ مهلت بازگشت پیش‌قدم: **{fa(v)} دقیقه**\n"
+                            "در حالت پیش‌قدم تا پایان این مهلت، نبودنِ طرف "
+                            "اخطار/لفت حساب نمی‌شود (او ممکن است هنوز آنلاین "
+                            "نشده باشد)؛ فقط چند یادآوریِ فاصله‌دار می‌رود.\n"
+                            "`تبادل مهلت پیشقدم ۱۸۰` (پیش‌فرض)  |  "
+                            "`تبادل مهلت پیشقدم ۰` = خاموش (لفت سریع قبلی)")
+                return ("⏳ مهلت بازگشت پیش‌قدم: **خاموش** — نبودنِ طرف از همان "
+                        "اول اخطار حساب می‌شود.\n`تبادل مهلت پیشقدم ۱۸۰`")
+            rest = re.sub(r"\s*(?:دقیقه|دقیقه‌ای|min)\s*$", "", rest).strip()
+            try:
+                v = num(rest)
+            except ValueError:
+                return "عدد بده (دقیقه): `تبادل مهلت پیشقدم ۱۸۰`"
+            v = max(0, min(1440, int(v)))
+            x["return_wait_minutes"] = v
+            self.st.save()
+            if not v:
+                return "⏳ مهلت بازگشت پیش‌قدم: **خاموش** (رفتار قبلی)"
+            _cap_h = int(x.get("permanent_check_max_hours", 24) or 0)
+            _warn = ""
+            if _cap_h and v > _cap_h * 60:
+                _warn = (f"\n⚠️ این مهلت از سقف نگهبانی ({fa(_cap_h)} ساعت) "
+                         "بیشتر است؛ چک‌ها فقط تا همان سقف ادامه دارند "
+                         "(`تبادل دائمی`).")
+            return (f"⏳ مهلت بازگشت پیش‌قدم: **{fa(v)} دقیقه**\n"
+                    "تا این مدت، نبودنِ طرفِ پیش‌قدم اخطار/لفت حساب نمی‌شود؛ "
+                    "فقط چند یادآوریِ فاصله‌دار می‌رود." + _warn)
+
         if sub == "response_delay":
             if not rest:
                 if "response_min_sec" in x or "response_max_sec" in x:
@@ -3809,6 +3856,8 @@ class Engine:
             "`تبادل زمان پاسخ ۱۵` — تأخیر جواب بعد از جوین",
             "`تبادل فاصله عملکرد ۱۵ ۲۰` — فاصله بین هر عملکرد",
             "`تبادل فاصله یادآوری ۲۰ ۴۰` · `تبادل تعداد یادآوری ۲`",
+            "`تبادل مهلت پیشقدم ۱۸۰` — تا این مدت، نبودنِ طرفِ پیش‌قدم\n"
+            "اخطار/لفت حساب نمی‌شود (۰ = خاموش)",
             "`تبادل اخطار ۲` — بعد از چند منفی لفت بدهد",
             "",
             "**سقف‌ها**",
@@ -3891,6 +3940,13 @@ class Engine:
             "دستور آماده برای کپی:",
             "`تبادل تعداد یادآوری ۲`",
             f"فعلی: {rem_cur}",
+            "",
+            "🚶 وقتی می‌خواهی مهلت بازگشتِ «پیش‌قدم» را عوض کنی:",
+            "(تا پایان این مهلت، نبودنِ طرف اخطار/لفت حساب نمی‌شود)",
+            "دستور آماده برای کپی:",
+            "`تبادل مهلت پیشقدم ۱۸۰`",
+            "فعلی: " + (f"{fa(max(0, int(x.get('return_wait_minutes', 180) or 0)))} دقیقه"
+                          if int(x.get('return_wait_minutes', 180) or 0) else "خاموش"),
             "",
             "🚦 وقتی می‌خواهی سقف ساعتی جوین بگذاری:",
             "دستور آماده برای کپی:",
@@ -6434,6 +6490,7 @@ async def connect_and_run(eng, creds):
 
         eng.db.ex_set(rec["id"], src_chat=event.chat_id, src_msg=event.id,
                       replied=0, peer_id=sender.id, peer_name=sender_name,
+                      member_ok_at=int(time.time()),   # تأیید شد عضو کانال من است
                       reminders_total=0)   # عضو واقعی بود — سابقه «نیومدی» پاک شود
 
         if x["auto_join"]:
@@ -6690,8 +6747,29 @@ async def connect_and_run(eng, creds):
                                       reminders=0, reminders_total=0,
                                       next_reminder=0,
                                       strikes=0, unk_streak=0, replied=0,
+                                      member_ok_at=now2,
                                       note="عضو شد — آماده Join")
                     elif still is False:
+                        # ── مهلت بازگشت «پیشقدم» ──
+                        # داخل این پنجره، پیش‌قدمی که طرفش هرگز عضو کانال من
+                        # دیده نشده لفت نمی‌خورد و پیام اضافه هم نمی‌گیرد؛
+                        # حلقه‌ی نگهبانی (شماره ۳) خودش با فاصله‌ی بلند
+                        # یادآوری‌ها را می‌فرستد و زمان‌بندی می‌کند.
+                        # تنظیم: `تبادل مهلت پیشقدم` (دقیقه؛ ۰ = رفتار قبلی).
+                        try:
+                            _rw_min = max(0, min(1440, int(
+                                x.get("return_wait_minutes", 180) or 0)))
+                        except (TypeError, ValueError):
+                            _rw_min = 180
+                        _jt = int(rec.get("joined_at") or rec.get("created_at")
+                                  or now_rem)
+                        if (_rw_min > 0 and rec.get("direction") == "out"
+                                and not int(rec.get("member_ok_at") or 0)
+                                and (now_rem - _jt) < _rw_min * 60):
+                            eng.db.ex_set(rec["id"], next_reminder=0,
+                                          strikes=0, unk_streak=0,
+                                          note="مهلت بازگشت پیش‌قدم — لفت معلق")
+                            continue
                         count = int(rec.get("reminders") or 0)
                         if count < max_rem:
                             # یادآوری بعدی «نیومدی» — فاصله تصادفی تا پیام
@@ -6785,7 +6863,13 @@ async def connect_and_run(eng, creds):
                                               leave_fail=_fails,
                                               leave_blocked_until=_now_l + _back,
                                               note=f"لفت نشد (تلاش {_fails}): {err}")
-                            eng.log("info", "ex_left", f"#{rec['id']} {rec['link']}")
+                            # فقط لفتِ موفق به‌عنوان «لفت داده‌شده» ثبت
+                            # می‌شود؛ تلاش ناموفق (لینک منقضی/فلود)
+                            # آمارِ لفت را الکی بالا نمی‌برد و جدا می‌رود.
+                            eng.log("info" if ok else "warn",
+                                    "ex_left" if ok else "ex_leave_fail",
+                                    f"#{rec['id']} {rec['link']}"
+                                    + ("" if ok else f" {err}"))
                             if ok and rec.get("direction") == "out":
                                 # بعد از لفت، نوبت بعدی را از گروه بررسی کن.
                                 x["_scan_now"] = True
@@ -6882,10 +6966,52 @@ async def connect_and_run(eng, creds):
                         eng.db.ex_set(rec["id"], last_check=now,
                                       next_check=next_action_after(
                                           rec, now + watch_delay_seconds(rec)),
-                                      strikes=0, unk_streak=0, reminders_total=0,
+                                      strikes=0, unk_streak=0,
+                                      reminders=0, next_reminder=0,
+                                      reminders_total=0,
+                                      member_ok_at=now,
                                       note="عضو است")
                     elif still is False:
                         st = rec["strikes"] + 1
+                        # ── مهلت بازگشت «پیشقدم» ──
+                        # در پیش‌قدم، ربات خودش اول جوین شده و طرف باید
+                        # برگردد. تا وقتی طرف هرگز عضو کانال من دیده نشده
+                        # و از جوینِ من زمان کافی نگذشته، «نبودن» او اخطار
+                        # لفت نیست — ممکن است هنوز آنلاین نشده باشد. در این
+                        # پنجره فقط چند یادآوریِ فاصله‌دار می‌رود و لفت
+                        # معلق می‌ماند. تنظیم: `تبادل مهلت پیشقدم` (دقیقه؛
+                        # ۰ = رفتار قبلی = لفتِ سریع).
+                        try:
+                            _rw_min = max(0, min(1440, int(
+                                x.get("return_wait_minutes", 180) or 0)))
+                        except (TypeError, ValueError):
+                            _rw_min = 180
+                        _jt = int(rec.get("joined_at") or rec.get("created_at")
+                                  or now)
+                        if (_rw_min > 0 and rec.get("direction") == "out"
+                                and not int(rec.get("member_ok_at") or 0)
+                                and (now - _jt) < _rw_min * 60):
+                            _cap = max(1, int(x.get("max_reminders", 2) or 1))
+                            _gap = max(120, (_rw_min * 60) // (_cap + 1))
+                            _rem = max(0, int(rec.get("reminders") or 0))
+                            _sent = False
+                            if x["reply"] and rec.get("peer_id") and _rem < _cap:
+                                _sent = await send_not_joined_reminder(rec)
+                                if _sent:
+                                    _rem += 1
+                            eng.db.ex_set(rec["id"], last_check=now,
+                                          strikes=0, unk_streak=0,
+                                          reminders=_rem,
+                                          reminders_total=(
+                                              int(rec.get("reminders_total") or 0)
+                                              + (1 if _sent else 0)),
+                                          next_reminder=0,
+                                          next_check=next_action_after(
+                                              rec, now + _gap),
+                                          note="مهلت بازگشت پیش‌قدم — لفت معلق")
+                            eng.log("info", "ex_return_wait",
+                                    f"#{rec['id']} {rec['link']}")
+                            continue
                         # فیکس: طرفی که از اول هیچ‌وقت نیامده (بدون ادعای
                         # «جوین شدم» و بدون پیام موفق — replied=0) اول باید
                         # «نیومدی» بشنود؛ لفتِ بی‌هشدار منصفانه نیست. دور
@@ -6960,7 +7086,13 @@ async def connect_and_run(eng, creds):
                                               leave_fail=_fails,
                                               leave_blocked_until=_now_l + _back,
                                               note=f"لفت نشد (تلاش {_fails}): {err}")
-                            eng.log("info", "ex_left", f"#{rec['id']} {rec['link']}")
+                            # فقط لفتِ موفق به‌عنوان «لفت داده‌شده» ثبت
+                            # می‌شود؛ تلاش ناموفق (لینک منقضی/فلود)
+                            # آمارِ لفت را الکی بالا نمی‌برد و جدا می‌رود.
+                            eng.log("info" if ok else "warn",
+                                    "ex_left" if ok else "ex_leave_fail",
+                                    f"#{rec['id']} {rec['link']}"
+                                    + ("" if ok else f" {err}"))
                             if ok and rec.get("direction") == "out":
                                 # بعد از لفت، نوبت بعدی را از گروه بررسی کن.
                                 x["_scan_now"] = True
