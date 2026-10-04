@@ -1715,6 +1715,27 @@ def human_left(ts):
     return f"{_fa_digits(minutes)} دقیقه" if minutes else "کمتر از یک دقیقه"
 
 
+def trial_duration_label(minutes):
+    """برچسب فارسیِ مدت تست رایگان.
+
+    30 → «30 دقیقه» · 60 → «1 ساعت» · 90 → «1 ساعت و 30 دقیقه»
+    · 240 → «4 ساعت» · 1440 → «24 ساعت».
+
+    همه‌جا از این یک تابع استفاده می‌شود تا دکمه‌ی منو، متنِ پنل، پیام
+    کاربر و توضیحات با عددِ تنظیمات هم‌خوان بمانند.
+    """
+    try:
+        m = max(1, int(minutes or 30))
+    except (TypeError, ValueError):
+        m = 30
+    if m < 60:
+        return f"{_fa_digits(m)} دقیقه"
+    h, rem = divmod(m, 60)
+    if not rem:
+        return f"{_fa_digits(h)} ساعت"
+    return f"{_fa_digits(h)} ساعت و {_fa_digits(rem)} دقیقه"
+
+
 # ═══════════════════════════════════════════════════
 #  تنظیمات
 # ═══════════════════════════════════════════════════
@@ -1916,6 +1937,50 @@ class DB:
     def runnable(self):
         return self.x("SELECT * FROM clients WHERE status='active'"
                       " AND session IS NOT NULL AND session<>''", (), "all")
+
+    # ---------- تست رایگان ----------
+    def trial_stats(self):
+        """(کل کاربران، در حال تست، قبلاً تست گرفته‌اند)"""
+        total = self.x("SELECT COUNT(*) c FROM clients", (), "one")["c"]
+        running = self.x("SELECT COUNT(*) c FROM clients WHERE trial_expires_at>?",
+                         (now(),), "one")["c"]
+        used = self.x("SELECT COUNT(*) c FROM clients WHERE trial_used<>0"
+                      " OR trial_started_at>0", (), "one")["c"]
+        return int(total), int(running), int(used)
+
+    def trial_reset_all(self):
+        """تست رایگان را برای همه از نو قابل استفاده می‌کند.
+
+        - کسی که تستش تمام شده: کلِ ردِ تست پاک می‌شود (دوباره می‌تواند
+          تست بگیرد).
+        - کسی که همین حالا داخل تست است: تایمرِ جاری دست‌نخورده می‌ماند
+          (حلقه‌ی تست همان‌طور سرِ موعد خاموشش می‌کند) ولی از این لحظه
+          دوباره «واجد شرایط» حساب می‌شود.
+
+        خروجی: (تعداد رکوردهای ریست‌شده، تعداد در حال تست)
+        """
+        now_t = now()
+        with self.lock:
+            running = self.c.execute(
+                "SELECT COUNT(*) c FROM clients WHERE trial_expires_at>?",
+                (now_t,)).fetchone()[0]
+            cur = self.c.execute(
+                "UPDATE clients SET trial_used=0, trial_started_at=0,"
+                " trial_warning_sent=0,"
+                " trial_expires_at=CASE WHEN trial_expires_at>? THEN trial_expires_at"
+                " ELSE 0 END", (now_t,))
+            n = cur.rowcount
+            self.c.commit()
+        return max(0, int(n or 0)), int(running or 0)
+
+    def trial_reset_one(self, uid):
+        """تست رایگانِ یک کاربر را از نو می‌کند (تایمرِ در حال اجرا حفظ می‌شود)."""
+        now_t = now()
+        c = self.get(uid) or {}
+        keep = int(c.get("trial_expires_at") or 0)
+        self.set(uid, trial_used=0, trial_started_at=0, trial_warning_sent=0,
+                 trial_expires_at=(keep if keep > now_t else 0))
+        return True
 
     def expired(self):
         return self.x("SELECT * FROM clients WHERE status='active'"
@@ -2431,7 +2496,7 @@ USER_HELP = """📖 <b>دستورها</b>
 /on — روشن کردن
 /off — خاموش کردن
 /restart — راه‌اندازی دوباره
-/trial — شروع تست رایگان ۳۰ دقیقه‌ای
+/trial — شروع تست رایگان (مدتش را مدیر تعیین می‌کند)
 /log — چند خط آخر گزارش
 /cancel — لغو مرحله‌ی فعلی
 /help — همین راهنما"""
@@ -2446,7 +2511,7 @@ DEFAULT_TUTORIAL = """📚 <b>آموزش فعال‌سازی سلف</b>
 <b>قدم ۳</b> — سلف بالا می‌آید و از «⚙️ سرویس من» می‌توانی روشنش کنی.
 
 💡 <b>اعتبار</b>
-• «🎁 تست رایگان ۳۰ دقیقه‌ای» — بدون هزینه امتحانش کن.
+• «🎁 تست رایگان» — بدون هزینه امتحانش کن.
 • «🎯 خرید امتیاز» یا «💎 اشتراک ماهانه» — برای استفاده‌ی دائمی.
 
 ⚠️ کد ورودی فقط برای خودت می‌آید؛ آن را با کسی به اشتراک نگذار."""
@@ -2528,13 +2593,14 @@ def B(text, data, style=None):
 
 def main_menu(is_admin=False, shop_on=True, points_on=True,
               has_session=False, running=False, trial_available=False,
-              has_cmds=False, has_hub=True):
+              has_cmds=False, has_hub=True, trial_label="30 دقیقه"):
     rows = []
     # قدم اول همیشه بالا و برجسته
     # این دکمه همیشه باشد تا اکانت خارج‌شده یا اکانت قابل‌تعویض دوباره راه‌اندازی شود.
     rows.append([B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")])
     # دکمه تست رایگان همیشه برای تمام کاربران نمایش داده می‌شود
-    rows.append([B("🎁 تست رایگان ۳۰ دقیقه‌ای", "m:trial", "success")])
+    # (مدتش را مدیر از «🎁 تست رایگان» در پنل تعیین می‌کند)
+    rows.append([B(f"🎁 تست رایگان {trial_label}", "m:trial", "success")])
     # دو راه خرید، کنار هم — دکمه‌های خرید امتیاز همیشه نمایش داده می‌شوند
     if shop_on:
         buy = [B("💎 اشتراک ماهانه", "m:plans", "primary"),
@@ -2610,6 +2676,7 @@ def svc_menu(running, has_session, fee=0, sub=False):
 def admin_menu(pending=0, tickets=0, trial_on=True):
     p_lbl = "📤 سفارش‌های منتظر" + (f"  ({pending})" if pending else "")
     t_lbl = "🎧 تیکت‌ها" + (f"  ({tickets})" if tickets else "")
+    # دکمه حالا صفحه‌ی تنظیمات تست را باز می‌کند (مدت/یادآوری/ریست).
     tr_lbl = "🎁 تست رایگان: " + ("🟢 فعال" if trial_on else "🔴 غیرفعال")
     return [
         [B(p_lbl, "a:pending", "danger" if pending else "primary"),
@@ -2628,7 +2695,7 @@ def admin_menu(pending=0, tickets=0, trial_on=True):
          B("🧩 بخش‌های آموزش", "a:secs", "success")],
         [B("🗂 توضیحات (فهرست تپ‌کردنی)", "a:hub", "success")],
         [B("📝 متن خوش‌آمدگویی", "a:welcome", "primary"),
-         B(tr_lbl, "a:trial_tog", "success" if trial_on else "danger")],
+         B(tr_lbl, "a:trial", "success" if trial_on else "danger")],
         [B("📝 متن‌های ربات", "a:rt", "success"),
          B("📋 دستورات آماده", "a:cm", "success")],
         [B("📣 جوین اجباری", "a:fjoin", "danger"),
@@ -2994,7 +3061,8 @@ class Manager:
             credit = f"اعتبار: {human_left(c['expires_at'])}"
 
         txt = self.cfg["sold_text"] or (
-            ("🎁 <b>تست رایگان ۳۰ دقیقه‌ای فعال شد</b>" if trial else "✅ <b>راه‌اندازی شد")
+            ("🎁 <b>تست رایگان " + self.trial_label() + " فعال شد</b>" if trial
+             else "✅ <b>راه‌اندازی شد")
             + "\n" + self.LINE + "\n"
             f"👤 اکانت: {name}\n"
             f"📡 وضعیت: {'🟢 در حال کار' if ok else '🟡 ' + msg}\n"
@@ -3420,6 +3488,86 @@ class Manager:
             return False
         return True
 
+    # ---------- تنظیمِ تست رایگان از پنل مدیر ----------
+    def trial_minutes_now(self):
+        return max(1, int(self.cfg.get("trial_minutes", 30) or 30))
+
+    def trial_warn_now(self):
+        return max(1, int(self.cfg.get("trial_warning_minutes", 10) or 10))
+
+    def trial_label(self):
+        """برچسبِ مدتِ فعلی — برای دکمه‌ی منو و متن‌های کاربر."""
+        return trial_duration_label(self.trial_minutes_now())
+
+    def _parse_trial_minutes(self, raw):
+        """مدتِ تست از متن مدیر: «90» = ۹۰ دقیقه، «2 ساعت» = ۱۲۰ دقیقه.
+        سقف: ۳۰ روز. صفر = نامعتبر."""
+        t = str(raw or "").strip()
+        if not t:
+            return 0
+        t_num = t.translate(EN)
+        m = re.search(r"\d+(?:[.,]\d+)?", t_num)
+        if not m:
+            return 0
+        try:
+            v = float(m.group(0).replace(",", "."))
+        except ValueError:
+            return 0
+        is_hours = ("ساعت" in t) or ("h" in t_num.lower())
+        mins = int(round(v * 60)) if is_hours else int(round(v))
+        return max(1, min(30 * 24 * 60, mins))
+
+    def _set_trial_minutes(self, mins):
+        """مدت را ذخیره می‌کند و یادآوری را هم منطقی نگه می‌دارد
+        (یادآوری هرگز از نصفِ مدت بیشتر و از خودِ مدت کمتر نمی‌شود)."""
+        mins = max(1, int(mins or 30))
+        self.cfg["trial_minutes"] = mins
+        warn = max(1, min(self.trial_warn_now(), max(1, mins // 2)))
+        self.cfg["trial_warning_minutes"] = warn
+        self.cfg.save()
+        return mins, warn
+
+    def trial_screen(self):
+        """صفحه‌ی «🎁 تست رایگان» در پنل مدیر: روشن/خاموش، مدت، ریست."""
+        on = bool(self.cfg.get("trial_on", True))
+        mins = self.trial_minutes_now()
+        warn = self.trial_warn_now()
+        total, running, used = self.db.trial_stats()
+        txt = "\n".join([
+            "🎁 <b>تست رایگان</b>",
+            self.LINE,
+            f"وضعیت: {'🟢 فعال' if on else '🔴 غیرفعال'}",
+            f"مدت هر تست: <b>{trial_duration_label(mins)}</b>",
+            f"یادآوری: {_fa_digits(warn)} دقیقه آخر",
+            self.LINE,
+            f"👥 کاربران: {_fa_digits(total)}   ·   "
+            f"🌀 در حال تست: {_fa_digits(running)}   ·   "
+            f"✅ تست‌گرفته: {_fa_digits(used)}",
+            "",
+            "مدت را از دکمه‌ها انتخاب کن (✅ = فعلی) یا «مقدار دلخواه» را بزن.",
+            "♻️ «ریست تست همه» پرونده‌ی تستِ همه را پاک می‌کند تا دوباره "
+            "بتوانند تست رایگان بگیرند (تستِ در حال اجرا قطع نمی‌شود).",
+        ])
+
+        def dur_btn(m):
+            return B(("✅ " if m == mins else "") + trial_duration_label(m),
+                     f"a:trial_min:{m}",
+                     "success" if m == mins else "primary")
+
+        kb = [
+            [B("🔴 خاموش کن" if on else "🟢 روشن کن", "a:trial_tog",
+               "danger" if on else "success")],
+            [dur_btn(30), dur_btn(60), dur_btn(120)],
+            [dur_btn(180), dur_btn(360), dur_btn(720)],
+            [dur_btn(1440), B("✍️ مقدار دلخواه", "a:trial_min:x", "warning")],
+            [B(("✅ " if w == warn else "") + f"⏰ یادآوری {_fa_digits(w)} دقیقه",
+               f"a:trial_warn:{w}", "success" if w == warn else "primary")
+             for w in (5, 10, 15, 30)],
+            [B("♻️ ریست تست برای همه", "a:trial_reset", "danger")],
+            back_btn("a:home"),
+        ]
+        return txt, kb
+
     def can_run(self, uid):
         """(اجازه_اجرا, دلیل) — برای شروع حداقل min_points لازم است."""
         c = self.db.get(uid)
@@ -3650,6 +3798,7 @@ class Manager:
              B("▶️ روشن" if not self.sup.is_running(uid) else "⏹ خاموش",
                f"aproc:{uid}",
                "success" if not self.sup.is_running(uid) else "danger")],
+            [B("♻️ ریست تست رایگان", f"aut:{uid}", "warning")],
             [B("⬅️ لیست مشتری", "a:ulist:0", "primary"),
              B("🛠 پنل", "a:home", "danger")],
         ]
@@ -4597,7 +4746,7 @@ class Manager:
             )
         if key == "trial":
             return (
-                f"🎁 <b>تست رایگان {_fa_digits(mins)} دقیقه‌ای</b>\n{L}\n"
+                f"🎁 <b>تست رایگان {trial_duration_label(mins)}</b>\n{L}\n"
                 "بدون پرداخت، بدون کارت بانکی و بدون تعهد — کامل امتحان کن؛ "
                 "راضی بودی ادامه بده، نبودی هیچ هزینه‌ای ندادی.\n\n"
                 f"{L}\n"
@@ -5051,6 +5200,7 @@ class Manager:
                                              "verify_phone", "verify_referral", "bcast", "disc_new",
                                              "price_plan", "price_pack",
                                              "gp_n", "say_u", "card_set", "welcome_set",
+                                             "trial_min",
                                              "ok_days", "acct_n", "fjoin_add", "tut_set",
                                              "sec_set", "sec_name", "sec_emoji",
                                              "sec_delay", "sec_note", "sec_btn_url",
@@ -5079,6 +5229,7 @@ class Manager:
                                    bool((self.db.get(uid) or {}).get("session")),
                                    self.sup.is_running(uid),
                                    self.trial_available(uid),
+                                   trial_label=self.trial_label(),
                                    has_cmds=self.has_cmds(),
                                    has_hub=self.hub_on()))
         if not adm and not data.startswith("a:") and data != "m:home":
@@ -5096,6 +5247,7 @@ class Manager:
                                    bool((self.db.get(uid) or {}).get("session")),
                                    self.sup.is_running(uid),
                                    self.trial_available(uid),
+                                   trial_label=self.trial_label(),
                                    has_cmds=self.has_cmds(),
                                    has_hub=self.hub_on()))
 
@@ -5725,17 +5877,75 @@ class Manager:
         if data.startswith("a:") and adm:
             k = data[2:]
             await ans()
+            if k == "trial":
+                t, kb = self.trial_screen()
+                return await self.edit(ev, t, kb)
             if k == "trial_tog":
                 now_val = not bool(self.cfg.get("trial_on", True))
                 self.cfg["trial_on"] = now_val
                 self.cfg.save()
-                st = sh.stats() if sh else {"day": (0, 0), "orders": {}}
+                self.db.log(uid, "trial_toggle", "on" if now_val else "off")
+                t, kb = self.trial_screen()
                 return await self.edit(ev,
-                    f"🛠 <b>پنل مدیر</b>\n{self.LINE}\n"
-                    f"وضعیت تست رایگان: <b>{'🟢 فعال' if now_val else '🔴 غیرفعال'}</b>",
-                    admin_menu(st['orders'].get('paid', 0),
-                               len(sh.open_tickets()) if sh else 0,
-                               trial_on=now_val))
+                    f"وضعیت تست رایگان: <b>{'🟢 فعال' if now_val else '🔴 غیرفعال'}</b>\n"
+                    + self.LINE + "\n" + t, kb)
+            if k.startswith("trial_min:"):
+                v = k.split(":", 1)[1]
+                if v == "x":
+                    await ans()
+                    self.fsm[uid] = {"step": "trial_min"}
+                    return await self.edit(ev,
+                        "✍️ <b>مدت تست رایگان</b>\n" + self.LINE + "\n"
+                        "مدت را به <b>دقیقه</b> بفرست — مثال: <code>90</code>\n"
+                        "اگر ساعت می‌خواهی بنویس: <code>2 ساعت</code>\n"
+                        "نیم‌ساعت: <code>30</code> · یک‌ساعت: <code>60</code> · "
+                        "دو‌ساعت: <code>120</code>\n\n"
+                        "<i>/cancel برای لغو</i>",
+                        [back_btn("a:trial")])
+                mins = self._parse_trial_minutes(v)
+                if not mins:
+                    await ans("عدد نامعتبر")
+                    t, kb = self.trial_screen()
+                    return await self.edit(ev, t, kb)
+                mins, warn = self._set_trial_minutes(mins)
+                await ans(f"مدت: {trial_duration_label(mins)}")
+                t, kb = self.trial_screen()
+                return await self.edit(ev, f"✅ مدت تست: <b>{trial_duration_label(mins)}</b>"
+                                           f"  ·  یادآوری: {_fa_digits(warn)} دقیقه آخر\n"
+                                           + self.LINE + "\n" + t, kb)
+            if k.startswith("trial_warn:"):
+                mins = self.trial_minutes_now()
+                w = int(digits(k.split(":", 1)[1]) or 0)
+                w = max(1, min(w or 1, max(1, mins // 2)))
+                self.cfg["trial_warning_minutes"] = w
+                self.cfg.save()
+                await ans(f"یادآوری: {w} دقیقه آخر")
+                t, kb = self.trial_screen()
+                return await self.edit(ev, t, kb)
+            if k == "trial_reset":
+                total, running, used = self.db.trial_stats()
+                return await self.edit(ev,
+                    f"♻️ <b>ریست تست رایگان برای همه</b>\n{self.LINE}\n"
+                    f"پرونده‌ی تستِ <b>{_fa_digits(total)}</b> کاربر پاک می‌شود "
+                    f"({_fa_digits(used)} نفر قبلاً تست گرفته‌اند) و همه دوباره "
+                    "می‌توانند «تست رایگان» بگیرند.\n\n"
+                    "• تستِ کسی که همین حالا در حال اجراست قطع نمی‌شود؛ فقط "
+                    "دوباره واجد شرایط می‌شود.\n"
+                    "• اشتراک، امتیاز و کیف پول دست نمی‌خورد.\n\n"
+                    "مطمئنی؟",
+                    [[B("✅ بله، همه را ریست کن", "a:trial_reset_yes", "danger")],
+                     [B("↩️ انصراف", "a:trial", "primary")]])
+            if k == "trial_reset_yes":
+                n, running = self.db.trial_reset_all()
+                self.db.log(uid, "trial_reset_all", f"{n} clients, running={running}")
+                await ans("ریست شد")
+                t, kb = self.trial_screen()
+                msg = (f"✅ <b>ریست شد</b> — {_fa_digits(n)} کاربر دوباره می‌توانند "
+                       "تست رایگان بگیرند.\n")
+                if running:
+                    msg += (f"🌀 {_fa_digits(running)} نفر همین حالا داخل تست‌اند و "
+                            "تستشان قطع نشد.\n")
+                return await self.edit(ev, msg + self.LINE + "\n" + t, kb)
 
             if k == "home":
                 cnt = self.db.counts()
@@ -6572,6 +6782,27 @@ class Manager:
                 return await self.edit(ev, "پیدا نشد.", [back_btn("a:ulist:0")])
             return await self.edit(ev, self._admin_user_text(c), self._admin_user_kb(c))
 
+        if data.startswith("aut:") and adm:
+            # ریستِ تست رایگان برای یک کاربر (مدت و روشن‌بودنِ تست عوض نمی‌شود)
+            await ans()
+            tid = int(digits(data[4:]) or 0)
+            c = self.db.get(tid)
+            if not c:
+                return await self.edit(ev, "پیدا نشد.", [back_btn("a:ulist:0")])
+            self.db.trial_reset_one(tid)
+            self.db.log(tid, "trial_reset", "ریست توسط مدیر")
+            try:
+                await self.say(tid, "🎁 تست رایگانت دوباره فعال شد — از منو "
+                                    "«🎁 تست رایگان» را بزن.")
+            except Exception:
+                pass
+            c = self.db.get(tid)
+            return await self.edit(ev, self._admin_user_text(c) +
+                                   "\n♻️ تست رایگان این کاربر ریست شد"
+                                   + (" (تستِ در حال اجرا قطع نشد)."
+                                      if self.trial_active(tid) else "."),
+                                   self._admin_user_kb(c))
+
         if data.startswith("ab:") and adm:
             _, suid, flag = data.split(":")
             tid = int(suid)
@@ -6883,7 +7114,8 @@ class Manager:
         return False
 
     async def start_trial(self, uid, chat, ev=None):
-        """شروع تست ۳۰ دقیقه‌ای؛ تایمر بعد از راه‌اندازی موفق سلف شروع می‌شود."""
+        """شروع تست رایگان؛ مدت از پنل مدیر تعیین می‌شود و تایمر بعد از
+        راه‌اندازی موفق سلف شروع می‌شود."""
         if not self.cfg.get("trial_on", True):
             return await self.say(chat, "🎁 تست رایگان فعلاً در تنظیمات غیرفعال است.")
         
@@ -6896,10 +7128,11 @@ class Manager:
         else:
             if c.get("status") == "banned":
                 return await self.say(chat, "❌ دسترسی حساب شما مسدود است.")
-            # فقط در صورتی مانع شو که کاربر واقعاً ۳۰ دقیقه تستش را استارت زده و منقضی شده باشد
+            # فقط در صورتی مانع شو که کاربر واقعاً تستش را استارت زده باشد
             if int(c.get("trial_used") or 0) == 1 and int(c.get("trial_started_at") or 0) > 0:
                 txt = ("🎁 <b>تست رایگان قبلاً استفاده شده است</b>\n" + self.LINE + "\n"
-                       "شما قبلاً از ۳۰ دقیقه تست رایگان این اکانت استفاده کرده‌اید.\n"
+                       f"شما قبلاً از {self.trial_label()} تست رایگان این اکانت استفاده "
+                       "کرده‌اید.\n"
                        "برای ادامه، می‌توانید اشتراک ماهانه یا بسته امتیازی تهیه کنید.")
                 kb = [[B("💎 خرید اشتراک", "m:plans", "primary"),
                        B("🎯 خرید امتیاز", "m:packs", "success")],
@@ -7421,6 +7654,7 @@ class Manager:
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
                                    self.trial_available(uid),
+                                   trial_label=self.trial_label(),
                                    has_cmds=self.has_cmds(),
                                    has_hub=self.hub_on()))
 
@@ -7446,6 +7680,7 @@ class Manager:
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
                                    self.trial_available(uid),
+                                   trial_label=self.trial_label(),
                                    has_cmds=self.has_cmds(),
                                    has_hub=self.hub_on()))
 
@@ -7546,6 +7781,7 @@ class Manager:
                                             bool((self.db.get(uid) or {}).get("session")),
                                             self.sup.is_running(uid),
                                    self.trial_available(uid),
+                                   trial_label=self.trial_label(),
                                    has_cmds=self.has_cmds(),
                                    has_hub=self.hub_on()))
 
@@ -8357,7 +8593,8 @@ class Manager:
         return None
 
     async def trial_loop(self):
-        """تست ۳۰ دقیقه‌ای را پایش و ده دقیقه مانده یادآوری می‌کند."""
+        """تست رایگان را پایش می‌کند و «trial_warning_minutes» دقیقه مانده
+        به کاربر یادآوری می‌کند (چند دقیقه، از پنلِ مدیر تعیین می‌شود)."""
         while True:
             try:
                 warning = max(1, int(self.cfg.get("trial_warning_minutes", 10) or 10)) * 60
@@ -10543,6 +10780,7 @@ class Manager:
                                                 bool((self.db.get(uid) or {}).get("session")),
                                                 self.sup.is_running(uid),
                                    self.trial_available(uid),
+                                   trial_label=self.trial_label(),
                                    has_cmds=self.has_cmds(),
                                    has_hub=self.hub_on()))
 
@@ -11003,6 +11241,22 @@ class Manager:
                         + ("" if v else " (برگشت به پلن)"),
                         [[B("👤 مشتری", f"au:{tid}")]])
 
+                if stp == "trial_min" and self.is_admin(uid):
+                    self.fsm.pop(uid, None)
+                    mins = self._parse_trial_minutes(text)
+                    if not mins:
+                        return await self.say(ev.chat_id,
+                            "عدد نامعتبر. مثال: <code>90</code> (دقیقه) یا "
+                            "<code>2 ساعت</code>",
+                            [[B("🎁 تست رایگان", "a:trial", "primary")]])
+                    mins, warn = self._set_trial_minutes(mins)
+                    self.db.log(uid, "trial_minutes", str(mins))
+                    t, kb = self.trial_screen()
+                    return await self.say(ev.chat_id,
+                        f"✅ مدت تست: <b>{trial_duration_label(mins)}</b>  ·  "
+                        f"یادآوری: {_fa_digits(warn)} دقیقه آخر\n"
+                        + self.LINE + "\n" + t, kb)
+
                 if stp == "fjoin_add" and self.is_admin(uid):
                     self.fsm.pop(uid, None)
                     raw = text.strip()
@@ -11142,6 +11396,7 @@ class Manager:
                               bool((self.db.get(uid) or {}).get("session")),
                               self.sup.is_running(uid),
                                    self.trial_available(uid),
+                                   trial_label=self.trial_label(),
                                    has_cmds=self.has_cmds(),
                                    has_hub=self.hub_on()))
 

@@ -501,7 +501,11 @@ CREATE TABLE IF NOT EXISTS exchange (
     reminders INTEGER NOT NULL DEFAULT 0,
     next_reminder INTEGER NOT NULL DEFAULT 0,
     next_check INTEGER NOT NULL DEFAULT 0,
-    reminders_total INTEGER NOT NULL DEFAULT 0
+    reminders_total INTEGER NOT NULL DEFAULT 0,
+    chat_id INTEGER,
+    chat_hash INTEGER,
+    leave_fail INTEGER NOT NULL DEFAULT 0,
+    leave_blocked_until INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_ex ON exchange(status, last_check);
 CREATE TABLE IF NOT EXISTS events (
@@ -531,7 +535,10 @@ class DB:
                               ("next_check", "INTEGER NOT NULL DEFAULT 0"),
                               ("reminders_total", "INTEGER NOT NULL DEFAULT 0"),
                               ("claim_joined", "INTEGER NOT NULL DEFAULT 0"),
-                              ("unk_streak", "INTEGER NOT NULL DEFAULT 0")):
+                              ("unk_streak", "INTEGER NOT NULL DEFAULT 0"),
+                              ("chat_id", "INTEGER"), ("chat_hash", "INTEGER"),
+                              ("leave_fail", "INTEGER NOT NULL DEFAULT 0"),
+                              ("leave_blocked_until", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in have:
                     self.conn.execute(f"ALTER TABLE exchange ADD COLUMN {col} {decl}")
             # بعد از مهاجرت ساخته شود؛ وگرنه دیتابیس قدیمی هنوز ستون next_check ندارد.
@@ -1473,6 +1480,24 @@ def extract_links(text):
                 seen.add(v.lower())
                 out.append(v)
     return out
+
+
+def _input_channel(cid, chash=None):
+    """InputChannel از آیدی/access_hash کانال.
+
+    اگر access_hash نداشته باشیم ۰ می‌فرستیم (تلگرام خودش تصمیم می‌گیرد).
+    در محیطِ تست که telethon نصب نیست، شیمِ سبک برمی‌گردد تا منطقِ لفت
+    قابل‌آزمایش بماند.
+    """
+    try:
+        from telethon.tl.types import InputChannel
+        return InputChannel(int(cid), int(chash or 0))
+    except Exception:
+        try:
+            from types import SimpleNamespace
+            return SimpleNamespace(id=int(cid), access_hash=int(chash or 0))
+        except Exception:
+            return None
 
 
 def is_invite(link):
@@ -4002,14 +4027,31 @@ class Engine:
             f"👥 جذب موفق تبادل: {fa(c['in_joined'])} نفر",
         ])
 
-    def ex_live_leave_text(self, rec, err=""):
-        return "\n".join([
-            "👋 لفت انجام شد" if not err else "⚠️ لفت انجام نشد",
-            "",
-            f"📡 کانال: {rec.get('link') or '—'}",
-            "✅ طرف از کانال من خارج شده بود",
-            "✅ من هم از کانالش خارج شدم" if not err else f"⚠️ {err}",
-        ])
+    def ex_live_leave_text(self, rec, err="", reason="left"):
+        """گزارش لفت.
+
+        reason:
+          «left»   → چکِ نگهبانی دید طرف از کانال من خارج شده → من هم لفت دادم
+          «nojoin» → طرف بعد از دو «نیومدی» عضو کانال من نشد → من از کانالش لفت دادم
+
+        متنِ قبلی همیشه می‌گفت «طرف از کانال من خارج شده بود»، حتی وقتی
+        دلیلِ لفت این نبود (مثلاً طرف اصلاً نیامده بود) — همین باعث
+        سوتفاهم می‌شد.
+        """
+        why = ("⏳ طرف بعد از پیام‌های «نیومدی» عضو کانال من نشد"
+               if reason == "nojoin" else
+               "✅ طرف از کانال من خارج شده بود")
+        out = ["👋 لفت انجام شد" if not err else "⚠️ لفت انجام نشد",
+               "",
+               f"📡 کانال: {rec.get('link') or '—'}",
+               why,
+               "✅ من هم از کانالش خارج شدم" if not err else f"⚠️ {err}"]
+        if err:
+            fails = int(rec.get("leave_fail") or 0)
+            if fails:
+                out.append(f"🔁 تلاش ناموفق: {fa(fails)} — تلاش بعدی با فاصله‌ی "
+                           "بیشتر انجام می‌شود تا روی اکانت فشار نیفتد.")
+        return "\n".join(out)
 
     def ex_render(self, key, name="", channel=""):
         """متن کاربر را با مقادیر واقعی پر می‌کند. خالی = جوابی نده.
@@ -5575,14 +5617,41 @@ async def connect_and_run(eng, creds):
         # دوباره پشتِ فاصله‌ی صف نمی‌ایستد؛ فقط خنک‌کننده‌ی رکورد تازه می‌شود.
         return await peer_in_my_channel(user_id, rec_id, queue=False)
 
+    def remember_channel(rec_id, ent):
+        """آیدی و access_hash کانالِ جوین‌شده را روی رکورد ذخیره می‌کند.
+
+        چرا لازم است: لفت از کانال طرف قبلاً فقط با «لینک» انجام می‌شد و
+        برای لینک‌های خصوصی (t.me/+…) همان لینک باید دوباره حل شود؛ اگر
+        طرف لینک را باطل/منقضی کرده باشد، CheckChatInvite خطای
+        InviteHashExpired می‌دهد و لفت هیچ‌وقت انجام نمی‌شود (همان باگی که
+        گزارش شد). با ذخیره‌ی آیدیِ کانال در لحظه‌ی جوین، لفت دیگر به
+        لینک وابسته نیست."""
+        if not rec_id or ent is None:
+            return
+        try:
+            cid = getattr(ent, "id", None)
+            chash = getattr(ent, "access_hash", None)
+            if not cid:
+                return
+            eng.db.ex_set(int(rec_id), chat_id=int(cid),
+                          chat_hash=(int(chash) if chash is not None else None))
+        except Exception as e:
+            try:
+                eng.log("warn", "ex_identity", f"#{rec_id}: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
     async def join_link(link, rec_id=None):
         """جوین به کانال. برمی‌گرداند (موفق, پیام, عنوان)
 
         rec_id که داده شود، جوین در صفِ تک‌عملکردی اجرا می‌شود و
         خنک‌کننده‌ی همان رکورد ثبت می‌شود؛ یعنی چکِ عضویتِ بعد از جوین
-        زودتر از فاصله‌ی تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) انجام نمی‌شود."""
+        زودتر از فاصله‌ی تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) انجام نمی‌شود.
+        همچنین آیدیِ کانال برای لفت‌های بعدی ذخیره می‌شود."""
         if DRY_RUN:
             return True, "joined", "DRY_RUN"
+
+        joined_ent = {"e": None}
 
         async def _do_join():
             if is_invite(link):
@@ -5590,16 +5659,20 @@ async def connect_and_run(eng, creds):
                 title = ""
                 chats = getattr(upd, "chats", None)
                 if chats:
+                    joined_ent["e"] = chats[0]
                     title = getattr(chats[0], "title", "")
                 return True, "joined", title
             ent = await client.get_entity(link)
             await client(JoinChannelRequest(ent))
+            joined_ent["e"] = ent
             return True, "joined", getattr(ent, "title", "")
 
         try:
             # جوین یک «عملکرد» است: تا عملکرد قبلی تمام نشده و فاصله‌ی
             # تنظیم‌شده (پیش‌فرض ۱۵–۲۰ ثانیه) نگذشته باشد، اجرا نمی‌شود.
-            return await ex_cd.action("join", rec_id, _do_join)
+            out = await ex_cd.action("join", rec_id, _do_join)
+            remember_channel(rec_id, joined_ent["e"])
+            return out
 
         except UserAlreadyParticipantError:
             return True, "already", ""
@@ -5636,17 +5709,86 @@ async def connect_and_run(eng, creds):
 
         با rec_id، لفت بلافاصله بعد از چک/پیام اجرا نمی‌شود: اول
         خنک‌کننده‌ی رکورد (پیش‌فرض ۱۵–۲۰ ثانیه) تمام می‌شود. این همان
-        باگِ «چک کرد، درجا گفت نیومدی، درجا لفت داد» را می‌بندد."""
+        باگِ «چک کرد، درجا گفت نیومدی، درجا لفت داد» را می‌بندد.
+
+        ترتیبِ پیدا کردن کانال برای لفت:
+          ۱) آیدی/access_hash ذخیره‌شده در لحظه‌ی جوین — دیگر به لینک
+             طرف وابسته نیست؛
+          ۲) خودِ لینک/یوزرنیم طرف؛
+          ۳) اگر لینکِ خصوصی منقضی شده باشد: کانالی با همان عنوانِ
+             ذخیره‌شده که قبلاً جوینش کرده‌ایم (فقط تطبیقِ یکتا).
+        """
         if DRY_RUN:
             return True, ""
 
+        rec = None
+        if rec_id:
+            try:
+                rec = eng.db.ex_get(int(rec_id))
+            except Exception:
+                rec = None
+
+        def input_from_record():
+            # بدون access_hash هم InputChannel معتبر نیست (CHANNEL_INVALID)؛
+            # در آن حالت برمی‌گردیم به مسیر لینک/عنوان.
+            if not rec or not rec.get("chat_id") or not rec.get("chat_hash"):
+                return None
+            return _input_channel(rec.get("chat_id"), rec.get("chat_hash"))
+
+        async def resolve_by_title():
+            """آخرین چاره: کانالی که با همین عنوان قبلاً جوینش کرده‌ایم.
+            فقط اگر تطبیقِ یکتا باشد (عنوان تکراری = هیچ‌کاری نکن)."""
+            title = ((rec or {}).get("channel_title") or "").strip()
+            if not title:
+                return None
+            mine = {(eng.st.prof(t)["channel"] or "").lstrip("@").lower()
+                    for t in ("standard", "vip")}
+            mine.discard("")
+            found = None
+            try:
+                async for d in client.iter_dialogs(limit=300):
+                    e = d.entity
+                    if (getattr(e, "title", "") or "").strip() != title:
+                        continue
+                    if not hasattr(e, "access_hash"):
+                        continue
+                    if (getattr(e, "username", None) or "").lower() in mine:
+                        continue
+                    if found is not None:
+                        return None      # عنوان تکراری → لفتِ اشتباه نده
+                    found = e
+            except Exception as e:
+                eng.log("warn", "ex_leave_scan", f"{type(e).__name__}: {e}")
+                return None
+            return found
+
         async def _do_leave():
-            ent = await client.get_entity(link)
+            ent = input_from_record()
+            if ent is None:
+                try:
+                    ent = await client.get_entity(link)
+                except (InviteHashExpiredError, InviteHashInvalidError):
+                    # لینکِ طرف باطل/منقضی شده — با عنوانِ ذخیره‌شده امتحان کن
+                    ent = await resolve_by_title()
+                    if ent is None:
+                        eng.log("warn", "ex_leave_expired", str(link))
+                        raise
             await client(LeaveChannelRequest(ent))
             return True, ""
 
         try:
             return await ex_cd.action("leave", rec_id, _do_leave)
+        except UserNotParticipantError:
+            # از قبل عضو نبودیم → لفت لازم نیست؛ این خطا نیست
+            return True, ""
+        except ChannelPrivateError:
+            # کانال دیگر برای ما در دسترس نیست (خصوصی/بن) → عملاً عضو نیستیم
+            eng.log("warn", "ex_leave_private", str(link))
+            return True, ""
+        except (InviteHashExpiredError, InviteHashInvalidError):
+            return False, ("لینک طرف منقضی/باطل شده و آیدیِ کانال هم ذخیره "
+                           "نشده بود — لفت نشد؛ یک لینک تازه از طرف بگیر یا "
+                           "دستی از کانال خارج شو")
         except FloodWaitError as e:
             w = getattr(e, "seconds", 60)
             eng.join_thr.penalize(w)
@@ -6043,7 +6185,12 @@ async def connect_and_run(eng, creds):
         if replied_to_me and not claim and not extract_links(body_text):
             return
 
-        if x["words"] and not claim and not replied_to_me:
+        # فیلترِ کلمات برای ادعا/ریپلای است، نه برای لینکی که مستقیم در
+        # پیوی فرستاده می‌شود: کسی که در پیوی لینک کانالش را می‌فرستد
+        # دقیقاً درخواست تبادل داده است و نباید به‌خاطر فیلترِ گروهی
+        # بی‌جواب بماند (باگِ «به لینک‌های پیوی جواب نمی‌دهد»).
+        if x["words"] and not claim and not replied_to_me and not (
+                event.is_private and extract_links(body_text)):
             return
         sender_name = (f"@{sender.username}" if getattr(sender, "username", None)
                        else (getattr(sender, "first_name", "") or str(sender.id)))
@@ -6604,18 +6751,48 @@ async def connect_and_run(eng, creds):
                                     rec, int(time.time()) + membership_check_delay()),
                                     note="لفت معلق — عضویت نامشخص است")
                                 continue
+                            # اگر تلاشِ قبلیِ لفت شکست خورده و عقب‌نشینی
+                            # فعال است، دوباره تلاش نکن: هم به اکانت فشار
+                            # نمی‌آید، هم نوتیف تکراری نمی‌رود.
+                            _blk = int(rec.get("leave_blocked_until") or 0)
+                            if _blk > int(time.time()):
+                                eng.db.ex_set(rec["id"], next_reminder=0,
+                                              next_check=_blk,
+                                              note="لفت معلق — لینکِ طرف "
+                                                   "قابل‌حل نیست، بعداً دوباره")
+                                continue
                             ok, err = await leave_link(rec["link"], rec["id"])
-                            eng.db.ex_set(rec["id"],
-                                          status="left" if ok else "joined",
-                                          next_reminder=0 if ok else next_action_after(
-                                              rec, int(time.time()) + 60),
-                                          note="نیومد → لفت دادم" if ok else err)
+                            _now_l = int(time.time())
+                            if ok:
+                                eng.db.ex_set(rec["id"], status="left",
+                                              next_reminder=0, next_check=0,
+                                              leave_fail=0, leave_blocked_until=0,
+                                              note="نیومد → لفت دادم")
+                            else:
+                                # فیکس باگِ «بعد از خطای لفت، طرف در پیوی
+                                # جواب نمی‌گیرد»: رکوردِ لفت‌نشده دیگر در
+                                # حالتِ انتظار نمی‌ماند. با صفرکردن
+                                # next_reminder، پنجره‌ی فعالِ «نیومدی» باز
+                                # نمی‌ماند و پیام بعدی همین طرف جواب
+                                # می‌گیرد؛ تلاش بعدیِ لفت با عقب‌نشینیِ
+                                # پلکانی (۱ دقیقه → … → ۶ ساعت) زمان‌بندی
+                                # می‌شود تا حلقه‌ی تلاشِ هر دقیقه‌ای نسازد.
+                                _fails = int(rec.get("leave_fail") or 0) + 1
+                                _back = min(6 * 3600, 60 * (5 ** (_fails - 1)))
+                                eng.db.ex_set(rec["id"], status="joined",
+                                              next_reminder=0,
+                                              next_check=_now_l + _back,
+                                              leave_fail=_fails,
+                                              leave_blocked_until=_now_l + _back,
+                                              note=f"لفت نشد (تلاش {_fails}): {err}")
                             eng.log("info", "ex_left", f"#{rec['id']} {rec['link']}")
                             if ok and rec.get("direction") == "out":
                                 # بعد از لفت، نوبت بعدی را از گروه بررسی کن.
                                 x["_scan_now"] = True
                             if eng.ex_cfg().get("report_mode", "live") == "live":
-                                await note(eng.ex_live_leave_text(rec, "" if ok else err))
+                                await note(eng.ex_live_leave_text(
+                                    eng.db.ex_get(rec["id"]) or rec,
+                                    "" if ok else err, "nojoin"))
                         else:
                             # هنوز در کانالش جوین نشده‌ام؛ فقط تبادل لغو می‌شود.
                             eng.db.ex_set(rec["id"], status="failed",
@@ -6752,13 +6929,37 @@ async def connect_and_run(eng, creds):
                                     rec, int(time.time()) + membership_check_delay()),
                                     note="لفت معلق — عضویت نامشخص است")
                                 continue
+                            # عقب‌نشینیِ لفتِ ناموفق (لینک منقضی/خطای موقت):
+                            # تا پایان مهلت، تلاش تکراری نکن.
+                            _blk = int(rec.get("leave_blocked_until") or 0)
+                            if _blk > int(time.time()):
+                                eng.db.ex_set(rec["id"], last_check=now,
+                                              next_check=_blk,
+                                              note="لفت معلق — لینکِ طرف "
+                                                   "قابل‌حل نیست، بعداً دوباره")
+                                continue
                             ok, err = await leave_link(rec["link"], rec["id"])
-                            eng.db.ex_set(rec["id"],
-                                          status="left" if ok else "joined",
-                                          last_check=now, next_check=0 if ok else next_action_after(
-                                              rec, int(time.time()) + 60),
-                                          strikes=st, unk_streak=0,
-                                          note="لفت داد → لفت دادم" if ok else err)
+                            _now_l = int(time.time())
+                            if ok:
+                                eng.db.ex_set(rec["id"], status="left",
+                                              last_check=_now_l, next_check=0,
+                                              strikes=st, unk_streak=0,
+                                              leave_fail=0, leave_blocked_until=0,
+                                              note="طرف رفت → لفت دادم")
+                            else:
+                                # همان فیکسِ مسیر یادآوری: بعد از شکستِ لفت،
+                                # رکورد در «انتظارِ درجا» گیر نمی‌کند و تلاش
+                                # بعدی با عقب‌نشینیِ پلکانی زمان‌بندی می‌شود
+                                # (۱ دقیقه → … → ۶ ساعت).
+                                _fails = int(rec.get("leave_fail") or 0) + 1
+                                _back = min(6 * 3600, 60 * (5 ** (_fails - 1)))
+                                eng.db.ex_set(rec["id"], status="joined",
+                                              last_check=_now_l,
+                                              next_check=_now_l + _back,
+                                              strikes=st, unk_streak=0,
+                                              leave_fail=_fails,
+                                              leave_blocked_until=_now_l + _back,
+                                              note=f"لفت نشد (تلاش {_fails}): {err}")
                             eng.log("info", "ex_left", f"#{rec['id']} {rec['link']}")
                             if ok and rec.get("direction") == "out":
                                 # بعد از لفت، نوبت بعدی را از گروه بررسی کن.
@@ -6771,7 +6972,9 @@ async def connect_and_run(eng, creds):
                                 if not int(rec2.get("reminders") or 0):
                                     await send_not_joined_reminder(rec2)
                             if eng.ex_cfg().get("report_mode", "live") == "live":
-                                await note(eng.ex_live_leave_text(rec, "" if ok else err))
+                                await note(eng.ex_live_leave_text(
+                                    eng.db.ex_get(rec["id"]) or rec,
+                                    "" if ok else err, "left"))
                         else:
                             # در مرز، فقط یک‌بار یادآوری «نیومدی» بفرست؛ سپس بی‌صدا.
                             reminded = int(rec.get("reminders") or 0)
@@ -6845,9 +7048,33 @@ async def connect_and_run(eng, creds):
                     await asyncio.sleep(20)
                     continue
 
+                # ── شفافیتِ صف: اگر یک عملیات FloodWait خورده باشد، صفِ
+                # تک‌عملکردی تا پایان جریمه بسته است و هیچ پاسخ خودکاری
+                # (از جمله در پیوی) نمی‌آید. قبلاً این حالت کاملاً بی‌صدا
+                # بود و به‌نظر می‌رسید ربات مرده است؛ حالا یک‌بار توضیح
+                # داده می‌شود و در رویدادها هم ثبت می‌شود.
+                try:
+                    _bu = float(getattr(ex_cd, "blocked_until", 0) or 0)
+                except Exception:
+                    _bu = 0.0
+                if _bu > time.time():
+                    _left_b = max(1, int(_bu - time.time()))
+                    if int(x.get("_block_notice_at", 0) or 0) != int(_bu):
+                        x["_block_notice_at"] = int(_bu)
+                        eng.st.save()
+                        eng.db.log("warn", "ex_blocked", f"{_left_b}s")
+                        await note(
+                            "⏳ **صفِ تبادل موقتاً بسته است**\n"
+                            f"تلگرام برای این اکانت {secs(_left_b)} محدودیت "
+                            "(FloodWait) گذاشته است. تا پایان آن هیچ عملکردی "
+                            "— از جمله پاسخ به پیوی — اجرا نمی‌شود؛ بعد "
+                            "خودکار ادامه می‌دهم.\n"
+                            "اگر زیاد تکرار شد، «تبادل فاصله» را بزرگ‌تر کن "
+                            "یا تعداد تبادل‌های هم‌زمان را کم کن.")
+
                 # ۱) لفت‌های دستی
                 for rec in eng.db.ex_list("leaving", 5):
-                    ok, err = await leave_link(rec["link"])
+                    ok, err = await leave_link(rec["link"], rec["id"])
                     eng.db.ex_set(rec["id"], status="left" if ok else "failed",
                                   note="لفت دستی" if ok else err)
                     eng.log("info" if ok else "warn", "ex_leave",

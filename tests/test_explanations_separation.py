@@ -4,14 +4,25 @@ from pathlib import Path
 import unittest
 
 source = Path(__file__).resolve().parents[1].joinpath('manager_82.py').read_text()
-manager = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == 'Manager')
+tree = ast.parse(source)
+manager = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Manager')
 names = {'hub_sections', 'hub_default_items', 'hub_defaults_all', 'hub_made_keys',
          'hub_defaults_on', 'hub_default_text', 'hub_view', 'hub_intro', 'hub_page_size',
          'hub_default_row', 'hub_pages'}
 body = [n for n in manager.body if isinstance(n, ast.FunctionDef) and n.name in names
         or isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'HUB_DEFAULTS' for t in n.targets)]
 module = ast.Module(body=[ast.ClassDef(name='Hub', bases=[], keywords=[], body=body, decorator_list=[])], type_ignores=[])
-ns = {'B': lambda label, data, *args: (label, data), 'back_btn': lambda data: [('back', data)], '_fa_digits': str}
+ns = {'B': lambda label, data, *args: (label, data), 'back_btn': lambda data: [('back', data)],
+      '_fa_digits': str}
+# کمک‌تابع‌های واقعیِ سطحِ ماژول که hub_default_text صدا می‌زند (مثلاً برچسبِ
+# مدتِ تست رایگان) هم باید در همین فضا تعریف شوند تا متن‌ها قابل ساخت باشند.
+for helper_name in ('trial_duration_label',):
+    helper = next((n for n in tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name == helper_name), None)
+    if helper is None:
+        continue
+    exec(compile(ast.fix_missing_locations(
+        ast.Module(body=[helper], type_ignores=[])), '<hubhelpers>', 'exec'), ns)
 exec(compile(ast.fix_missing_locations(module), '<hub>', 'exec'), ns)
 
 class ExplanationsTests(unittest.TestCase):
