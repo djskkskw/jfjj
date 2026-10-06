@@ -152,9 +152,11 @@ def scenario_sigterm_forwarded():
     print("--- 6: SIGTERM is forwarded to the manager ---")
     image, app = build({})
     (image / "manager_82.py").write_text(
-        "import signal, sys, time\n"
-        "signal.signal(signal.SIGTERM, lambda *a: (print('GOT_TERM', flush=True),"
-        " sys.exit(0)))\n"
+        "import signal, sys, time, os\n"
+        "def _h(*a):\n"
+        "    os.write(1, b'GOT_TERM\\n')\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _h)\n"
         "print('READY', flush=True)\n"
         "time.sleep(60)\n", encoding="utf-8")
     env = dict(os.environ, JAFJ_IMAGE_DIR=str(image), JAFJ_APP_DIR=str(app))

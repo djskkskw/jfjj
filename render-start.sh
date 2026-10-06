@@ -22,5 +22,6 @@ IMAGE_DIR="${JAFJ_IMAGE_DIR:-/opt/jafj}"
 # Render persistent Disk mount point. Override with JAFJ_APP_DIR if you mount
 # the disk somewhere else; the shared entrypoint falls back to /data anyway.
 export JAFJ_APP_DIR="${JAFJ_APP_DIR:-/data}"
+export PORT="${PORT:-10000}"
 
 exec sh "$IMAGE_DIR/railway-start.sh" "$@"
