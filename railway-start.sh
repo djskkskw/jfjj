@@ -17,6 +17,10 @@
 #     lock file, empty Volume) repeated forever. The manager is supervised
 #     here now: it is restarted in place, and only repeated instant crashes are
 #     handed back to Railway's own restart policy.
+#
+#  3) HEALTH CHECK. Railway needs 0.0.0.0:$PORT to answer quickly, even while
+#     the manager is pulling GitHub data or restarting after a crash. This
+#     script now starts a tiny health server immediately, before anything else.
 # ═══════════════════════════════════════════════════════════════════════════
 set -eu
 
@@ -25,7 +29,7 @@ APP_DIR="${JAFJ_APP_DIR:-/app}"              # usually where the Volume is
 MANAGER_NAME="manager_82.py"
 SELF_NAME="95.py"
 
-log() { echo "SELFBOOT: $*"; }
+log() { echo "SELFBOOT: $*" >&2; }
 
 # آیا این پوشه‌ی داده، یک نسخه‌ی قابل‌اجرا از کد را نگه داشته است؟
 # (دیسک/Volume مانت‌شده روی مسیرِ کد = هر دیپلوی بی‌اثر)
@@ -52,6 +56,94 @@ pick_python() {
     echo python3
 }
 PY="$(pick_python)"
+
+# ── 0) Immediate health server for Railway/Render ──────────────────────────
+# Railway injects $PORT and expects 0.0.0.0:$PORT to respond within seconds.
+# Without this, a slow GitHub pull or a manager restart window makes Railway
+# mark the deployment as failed, even though the manager itself also starts a
+# health server in a thread.
+PORT="${PORT:-8080}"
+export PORT
+
+HEALTH_PID=0
+start_health() {
+    # A minimal HTTP server that answers 200 on any path.
+    # It stays alive for the whole container lifetime, so Railway's healthcheck
+    # never sees a closed port during manager restarts.
+    # Logs go to stderr to avoid contending with manager's stdout pipe.
+    "$PY" -u <<'PYEOF' 2>&1 &
+import os, sys, time
+import http.server, socketserver
+
+port = int(os.environ.get("PORT", "8080"))
+
+def slog(msg):
+    print(f"SELFBOOT: {msg}", file=sys.stderr, flush=True)
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Railway healthcheck can use / , /healthz , /health etc.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "8")
+        self.end_headers()
+        try:
+            self.wfile.write(b"JAFJ OK\n")
+        except Exception:
+            pass
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "8")
+        self.end_headers()
+    def log_message(self, *a):
+        pass
+
+class ReusableTCPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 128
+
+# Try a few times; if manager's own health server already bound, this will
+# fail and we exit gracefully — manager's server will handle it.
+for attempt in range(10):
+    try:
+        with ReusableTCPServer(("0.0.0.0", port), Handler) as httpd:
+            slog(f"health on 0.0.0.0:{port} (entrypoint) pid={os.getpid()}")
+            httpd.serve_forever()
+        break
+    except OSError as e:
+        # Address already in use -> another health server is already running (manager's)
+        if "Address already in use" in str(e) or "already" in str(e).lower():
+            slog(f"health port {port} already in use — another server is handling it")
+            break
+        slog(f"health bind failed ({e}) attempt {attempt+1}/10")
+        time.sleep(1)
+    except Exception as e:
+        slog(f"health error {e}")
+        time.sleep(1)
+
+PYEOF
+    HEALTH_PID=$!
+    log "health server started pid=$HEALTH_PID port=$PORT"
+}
+
+stop_health() {
+    if [ "$HEALTH_PID" -gt 0 ]; then
+        kill -TERM "$HEALTH_PID" 2>/dev/null || true
+        _i=0
+        while [ "$_i" -lt 3 ] && kill -0 "$HEALTH_PID" 2>/dev/null; do
+            sleep 1
+            _i=$((_i + 1))
+        done
+        kill -KILL "$HEALTH_PID" 2>/dev/null || true
+        HEALTH_PID=0
+    fi
+}
+
+start_health
 
 # ── 1) where does the data live? (Volume wins, image dir is a last resort) ──
 if [ -z "${DATA_DIR:-}" ]; then
@@ -92,6 +184,7 @@ if [ ! -f "$MANAGER" ]; then
         log "WARNING: $IMAGE_DIR/$MANAGER_NAME missing — running the copy in $DATA_DIR (rebuild the image)"
     else
         echo "ERROR: no $MANAGER_NAME in $IMAGE_DIR or $DATA_DIR — image is broken or too old, redeploy." >&2
+        stop_health
         exit 1
     fi
 fi
@@ -105,7 +198,7 @@ if [ "$DATA_DIR" != "$IMAGE_DIR" ] && [ -f "$DATA_DIR/$MANAGER_NAME" ] \
     log "note: $DATA_DIR/$MANAGER_NAME differs from the image copy and is NOT executed"
 fi
 
-log "code=$IMAGE_DIR data=$DATA_DIR python=$PY self=$([ -s "$SELF" ] && echo ok || echo MISSING)"
+log "code=$IMAGE_DIR data=$DATA_DIR python=$PY self=$([ -s "$SELF" ] && echo ok || echo MISSING) port=$PORT"
 
 # ── 2.5) GitHub data sync: اطلاعات مشتری‌ها از/به گیت‌هاب ────────────────────
 # اگر DATA_GITHUB_TOKEN تنظیم نشده باشد، هیچ اتفاقی نمی‌افتد (اختیاری است).
@@ -139,6 +232,8 @@ fi
 # ── 3) run it ───────────────────────────────────────────────────────────────
 if [ "${JAFJ_SUPERVISE:-1}" = "0" ]; then
     cd "$DATA_DIR" 2>/dev/null || true
+    # In non-supervised mode, keep entrypoint health server alive in background
+    # and exec manager. The health server becomes child of init after exec.
     exec "$PY" "$MANAGER"
 fi
 
@@ -175,11 +270,13 @@ while :; do
 
     if [ "$STOPPING" = 1 ]; then
         stop_sync
+        stop_health
         exit "$code"
     fi
     if [ "$code" = 0 ]; then
         log "manager exited cleanly"
         stop_sync
+        stop_health
         exit 0
     fi
 
@@ -192,13 +289,14 @@ while :; do
     if [ "$crashes" -ge "$MAX_CRASHES" ]; then
         log "manager crashed $crashes times in a row — giving up so Railway reports it"
         stop_sync
+        stop_health
         exit "$code"
     fi
     nap=$(( NAP_BASE * (crashes + 1) ))
     if [ "$nap" -gt 60 ]; then
         nap=60
     fi
-    log "manager exited with code $code after ${ran}s — restarting in ${nap}s"
+    log "manager exited with code $code after ${ran}s — restarting in ${nap}s (health still on :$PORT)"
     if [ "$nap" -gt 0 ]; then
         sleep "$nap"
     fi

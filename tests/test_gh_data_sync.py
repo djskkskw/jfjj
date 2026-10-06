@@ -350,8 +350,9 @@ def scenario_wiring():
     check('"$PY" "$SYNC" loop &' in rs, "ذخیره‌ی دوره‌ای در پس‌زمینه")
     check('if [ -n "${DATA_GITHUB_TOKEN:-}" ]' in rs,
           "بدون توکن، هیچ اتفاقی نمی‌افتد (اختیاری)")
-    check("stop_sync" in rs and "stop_sync\n        exit \"$code\"" in rs,
+    check("stop_sync" in rs and "exit \"$code\"" in rs and rs.find("stop_sync") < rs.find("exit \"$code\"") ,
           "هنگام خاموشی، ذخیره‌ی پایانی فرصت اجرا می‌گیرد")
+    check("stop_health" in rs, "هنگام خاموشی، هلث‌سرور هم جمع می‌شود")
     ry = (REPO / "render.yaml").read_text(encoding="utf-8")
     check(re.search(r"key:\s*DATA_GITHUB_TOKEN\s*\n\s*sync:\s*false", ry),
           "DATA_GITHUB_TOKEN در render.yaml به‌صورت secret (sync: false)")
